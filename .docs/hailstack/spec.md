@@ -1168,6 +1168,12 @@ Mount path: /lustre.
 
 ## G: Post-Creation Software Installation
 
+The `install` command adds supplementary system and Python packages
+to running clusters — packages outside the bundle (e.g. pandas,
+libpq-dev). It does not modify bundle components (Spark, Hadoop,
+Hail); changing those requires `destroy` + `create` with a new
+bundle (see Appendix: Key Decisions).
+
 ### G1: Install command
 
 As a user, I want `hailstack install` to add system and Python
@@ -2004,9 +2010,12 @@ preview, and structured outputs without shell-exec wrapping.
 state. Ceph S3 backend prevents concurrent-apply conflicts. No
 local state files.
 
-**No update command:** Destroy + recreate is simpler with fat images.
-Avoids in-place upgrade complexity. Data preserved via S3 and
-optionally preserved volumes.
+**No update command:** Destroy + recreate is simpler with fat images
+for bundle-level changes (Spark, Hadoop, Hail, Java versions). Avoids
+in-place upgrade complexity. Data preserved via S3 and optionally
+preserved volumes. The `install` command (section G) handles
+supplementary packages (system and Python) on running clusters —
+these are user add-ons outside the bundle, not bundle upgrades.
 
 **Bundle selection:** Users pick from named presets (not individual
 versions). Matrix locked in repo, changes via PRs. Prevents
