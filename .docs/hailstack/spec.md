@@ -42,7 +42,7 @@ command helps generate `clouds.yaml` from legacy `openrc.sh`.
 
 **Project layout:**
 
-```
+```text
 pyproject.toml
 bundles.toml
 example-config.toml
@@ -260,8 +260,6 @@ def load_config(
 5. Given `cluster.name = "9starts-with-digit"`, then raises
    `ValidationError`.
 6. Given TOML syntax error, then raises `ConfigError` with line number.
-7. Given `worker_flavour` omitted, then `worker_flavour` equals
-   `master_flavour`.
 
 ### A3: Environment variable and .env support
 
@@ -302,8 +300,8 @@ sections, sensible defaults, and example Sanger values.
 Sections:
 
 - `[cluster]`: name, bundle, num_workers, master_flavour,
-  worker_flavour, network_name, ssh_username, monitoring,
-  floating_ip.
+  worker_flavour, network_name, lustre_network, ssh_username,
+  monitoring, floating_ip.
 - `[volumes]`: create, name, size_gb, preserve_on_destroy,
   existing_volume_id.
 - `[s3]`: endpoint, access_key, secret_key (for S3A/Ceph data
@@ -345,7 +343,7 @@ class SecurityGroups(BaseModel):
         jupyter=True, hdfs=True, netdata=True,
     )
     worker: SecurityGroupConfig = SecurityGroupConfig(
-        hdfs=True, spark_worker=True, all_tcp_internal=True,
+        ssh=False, hdfs=True, spark_worker=True, all_tcp_internal=True,
     )
 
 class VolumeConfig(BaseModel):
@@ -433,7 +431,7 @@ defaults)
 
 [cluster]
 name = "my-cluster"
-bundle = "hail-0.2.137"
+bundle = "hail-0.2.137-gnomad-3.0.4-r2"
 num_workers = 4
 master_flavour = "m2.2xlarge"
 # worker_flavour defaults to master_flavour if omitted
@@ -530,24 +528,37 @@ python_packages = ["pandas", "scikit-learn"]
 ### C1: Matrix structure and bundle query
 
 As a developer, I want a checked-in TOML file listing all supported
-version bundles, structured hierarchically by Hail version. Each Hail
-version maps to exactly one known-good combo of component versions.
-Users select by bundle ID (e.g. "hail-0.2.137") which corresponds to
-the Hail version. "Multiple known-good combos" means multiple Hail
-versions are available, each with its own validated combo. There is
-one combo per Hail version (not multiple alternative combos for the
-same Hail version).
+version bundles as flat entries with explicit human-friendly IDs.
+Each bundle defines the full set of component versions. The same
+Hail+Gnomad pair may appear in multiple bundles with different
+underlying component versions (e.g. security-patched Spark/Hadoop).
+Bundle IDs follow the pattern
+`hail-<hail_ver>-gnomad-<gnomad_ver>-r<revision>`. The revision
+suffix (`-r1`, `-r2`, etc.) distinguishes bundles sharing the same
+Hail+Gnomad but with different infrastructure component versions.
 
 **File:** `bundles.toml` (repo root)
 
 ```toml
 [default]
-bundle = "hail-0.2.137"
+bundle = "hail-0.2.137-gnomad-3.0.4-r2"
 
-# Hierarchical: Hail version is the primary key.
-# Bundle ID derived as "hail-<version>" from the key.
+# Flat bundles with explicit IDs.
+# Revision suffix distinguishes bundles sharing the same
+# Hail+Gnomad pair but with different infrastructure versions.
 
-[hail."0.2.137"]
+[bundle."hail-0.2.137-gnomad-3.0.4-r1"]
+hail = "0.2.137"
+spark = "3.5.4"
+hadoop = "3.4.0"
+java = "11"
+python = "3.12"
+scala = "2.12.18"
+gnomad = "3.0.4"
+status = "supported"
+
+[bundle."hail-0.2.137-gnomad-3.0.4-r2"]
+hail = "0.2.137"
 spark = "3.5.6"
 hadoop = "3.4.1"
 java = "11"
@@ -556,7 +567,8 @@ scala = "2.12.18"
 gnomad = "3.0.4"
 status = "latest"
 
-[hail."0.2.136"]
+[bundle."hail-0.2.136-gnomad-3.0.4-r1"]
+hail = "0.2.136"
 spark = "3.5.4"
 hadoop = "3.4.0"
 java = "11"
@@ -566,8 +578,8 @@ gnomad = "3.0.4"
 status = "supported"
 ```
 
-The Bundle `id` is derived as `hail-<version>` from the `[hail."<version>"]`
-key. The `hail` field is implicit from the key.
+Each `[bundle."<id>"]` section defines all component versions
+explicitly. The bundle `id` is taken directly from the TOML key.
 
 **Package:** `hailstack/config/`
 **File:** `config/compatibility.py`
@@ -577,8 +589,8 @@ key. The `hail` field is implicit from the key.
 from pydantic import BaseModel
 
 class Bundle(BaseModel):
-    id: str          # derived: "hail-<version>"
-    hail: str        # derived from TOML key
+    id: str          # from TOML key: [bundle."<id>"]
+    hail: str        # explicit field
     spark: str
     hadoop: str
     java: str
@@ -589,8 +601,8 @@ class Bundle(BaseModel):
 
 class CompatibilityMatrix:
     def __init__(self, path: Path) -> None:
-        """Parse bundles.toml. Derive bundle id and hail version
-        from [hail."<version>"] keys."""
+        """Parse bundles.toml. Read bundle id and all component
+        versions from [bundle."<id>"] sections."""
         ...
     def get_bundle(self, bundle_id: str) -> Bundle: ...
     def get_default(self) -> Bundle: ...
@@ -603,13 +615,21 @@ class CompatibilityMatrix:
    accessible by ID.
 2. When `get_default()` called, then returns bundle matching
    `[default].bundle`.
-3. When `get_bundle("hail-0.2.137")` called, then returns bundle
-   with `spark="3.5.6"`, `hadoop="3.4.1"`, etc.
+3. When `get_bundle("hail-0.2.137-gnomad-3.0.4-r2")` called, then
+   returns bundle with `hail="0.2.137"`, `spark="3.5.6"`,
+   `hadoop="3.4.1"`, `gnomad="3.0.4"`.
 4. When `get_bundle("nonexistent")` called, then raises
    `BundleNotFoundError` listing available IDs.
 5. When `list_bundles()` called, then returns all bundles.
-6. Given empty bundles.toml (no `[hail.*]` sections), then raises
+6. Given empty bundles.toml (no `[bundle.*]` sections), then raises
    `ConfigError`.
+7. Given two bundles `hail-0.2.137-gnomad-3.0.4-r1` and
+   `hail-0.2.137-gnomad-3.0.4-r2`, when both queried, then they
+   return different spark and hadoop versions (`r1` has
+   `spark="3.5.4"`, `hadoop="3.4.0"`; `r2` has `spark="3.5.6"`,
+   `hadoop="3.4.1"`).
+8. Given bundle entry missing required field (e.g. `spark` omitted),
+   then raises `ConfigError` with field name in message.
 
 ### C2: Bundle validation at CLI time
 
@@ -798,17 +818,16 @@ All software is pre-installed in the Packer image. Cloud-init only
 generates cluster-specific config and starts services.
 
 Nginx reverse proxy paths (all behind basic auth on HTTP/HTTPS):
-| Path | Backend | Port |
-|------|---------|------|
+| Path | Backend | Notes |
+|------|---------|-------|
 | /jupyter | localhost:8888 | WebSocket-aware |
 | /spark | localhost:8080 | Spark Master UI |
 | /sparkhist | localhost:18080 | Spark History UI |
 | /yarn | localhost:8088 | YARN RM UI |
 | /mapreduce | localhost:19888 | MR History UI |
 | /nm<NN> | worker-NN:8042 | YARN NodeMgr UI |
+| /hdfs | localhost:9870 | HDFS NameNode UI |
 | /netdata | localhost:19999 | Netdata (if enabled) |
-
-HDFS NameNode UI (9870) also proxied via nginx.
 
 Secrets from env vars (injected via Pulumi user data):
 - `HAILSTACK_WEB_PASSWORD`: nginx htpasswd + Jupyter password
@@ -845,7 +864,7 @@ def generate_worker_cloud_init(
 3. Given num_workers=3, then /etc/hosts block contains master +
    3 worker entries.
 4. Cloud-init output contains nginx config with /jupyter, /spark,
-   /sparkhist, /yarn, /mapreduce proxy locations.
+   /sparkhist, /yarn, /mapreduce, /hdfs proxy locations.
 5. Given HAILSTACK_WEB_PASSWORD set, then htpasswd file created.
 6. Given HAILSTACK_WEB_PASSWORD not set, then raises
    `ConfigError` "HAILSTACK_WEB_PASSWORD required" before
@@ -862,14 +881,16 @@ def generate_worker_cloud_init(
     /etc/resolv.conf updated with search domain.
 11. Given extras.system_packages=["libpq-dev"], then cloud-init
     includes apt-get install of those packages.
-12. Given 3 SSH public keys in config, then cloud-init writes all
+12. Given extras.python_packages=["pandas"], then cloud-init
+    includes uv pip install of those packages into the overlay venv.
+13. Given 3 SSH public keys in config, then cloud-init writes all
     3 to /home/<ssh_username>/.ssh/authorized_keys.
-13. Given s3.endpoint and s3.access_key set, then cloud-init writes
+14. Given s3.endpoint and s3.access_key set, then cloud-init writes
     core-site.xml with `fs.s3a.endpoint`, `fs.s3a.access.key`,
     `fs.s3a.secret.key`, and `fs.s3a.connection.maximum=100`.
-14. Given s3.endpoint empty, then core-site.xml omits S3A
+15. Given s3.endpoint empty, then core-site.xml omits S3A
     properties.
-15. Given lustre_network set, then cloud-init configures
+16. Given lustre_network set, then cloud-init configures
     /lustre mount point on master.
 
 ### D4: Cloud-init provisioning (workers)
@@ -897,6 +918,10 @@ Workers wait for master NFS (port 2049) before mounting
    core-site.xml with same S3A properties as master.
 6. Given lustre_network set, then worker cloud-init configures
    /lustre mount point.
+7. Given extras.system_packages=["libpq-dev"], then worker
+   cloud-init includes apt-get install of those packages.
+8. Given extras.python_packages=["pandas"], then worker cloud-init
+   includes uv pip install into the overlay venv.
 
 ### D5: Floating IP management
 
@@ -968,7 +993,7 @@ def build_image(
       ssh_username    <- config.ssh_username
       flavor          <- config.packer.flavour
       network         <- config.network_name
-      floating_ip_pool<- config.packer.floating_ip_pool
+      floating_ip_pool <- config.packer.floating_ip_pool
     """
     ...
 ```
@@ -997,7 +1022,8 @@ def build_image_cmd(
 
 1. Given valid bundle, when build-image invoked, then Packer runs
    with correct variable values (versions, image name).
-2. Image named `hailstack-hail-0.2.137` uploaded to Glance.
+2. Image named `hailstack-hail-0.2.137-gnomad-3.0.4-r2` uploaded
+   to Glance.
 3. Given bundle not in matrix, then `BundleNotFoundError` before
    Packer invoked.
 4. Given Packer build fails, then `PackerError` with stderr output.
@@ -1012,9 +1038,10 @@ def build_image_cmd(
 12. Image contains uv.
 13. Image contains systemd unit files for all services.
 14. Image does NOT contain SSH keys or cluster-specific config.
-15. Given `--bundle hail-0.2.136` with config specifying bundle
-    `hail-0.2.137`, then image built for `hail-0.2.136` (CLI
-    override takes precedence).
+15. Given `--bundle hail-0.2.136-gnomad-3.0.4-r1` with config
+    specifying bundle `hail-0.2.137-gnomad-3.0.4-r2`, then image
+    built for `hail-0.2.136-gnomad-3.0.4-r1` (CLI override takes
+    precedence).
 
 ### E2: Packer template structure
 
@@ -1147,7 +1174,7 @@ As a user, I want `hailstack install` to add system and Python
 packages to all running cluster nodes.
 
 Supports inline args and file-based lists:
-```
+```shell
 hailstack install --config my.toml \
   --system pkg1 pkg2 \
   --python pypkg1 pypkg2 \
@@ -1164,17 +1191,17 @@ Workflow:
 4. Run idempotent Ansible playbook on all nodes:
    - System packages via OS package manager (apt).
    - Python packages via uv into shared managed env (not system pip).
-4. Record rollout:
+5. Record rollout:
    - Rollout manifest JSON to Ceph S3 with SHA-256 hash.
    - Per-node result JSON to Ceph S3.
    - Node-local `/var/lib/hailstack/software-state.json`.
-5. Verify on each node:
+6. Verify on each node:
    - Package present (dpkg -l / uv pip list).
    - Version matches expected.
    - Python import check succeeds (for Python packages).
    - Optional smoke test command succeeds.
-6. Auto-retry with backoff on per-node failures (1/2/4s, 3 attempts).
-7. On partial failure: write partial state to S3, exit non-zero.
+7. Auto-retry with backoff on per-node failures (1/2/4s, 3 attempts).
+8. On partial failure: write partial state to S3, exit non-zero.
 
 Targets all nodes uniformly (no master/worker distinction).
 
@@ -1236,6 +1263,8 @@ def install(
     succeed, 1 fails, partial state written, exit code non-zero.
 12. Re-running same install command is idempotent (no errors, no
     changes).
+13. Given `--ssh-key /path/to/key`, then Ansible uses that key for
+    SSH connections to all nodes.
 
 ### G2: Ansible runner for installs
 
@@ -1273,7 +1302,9 @@ Python environment strategy:
   contains core stack (Hail, PySpark, Jupyter, Gnomad). Never
   modified post-image-creation.
 - **Overlay venv** (`/opt/hailstack/overlay-venv`): created on first
-  `install` invocation, inherits base venv packages via
+  need -- either by cloud-init when `extras.python_packages` is
+  non-empty, or by the first `install` invocation, whichever comes
+  first, inherits base venv packages via
   `--system-site-packages`, receives user-installed packages.
   Users' Python code can import from both.
 
@@ -1349,7 +1380,7 @@ state. Default: Pulumi stack outputs only (fast, no SSH). With
 Default output (human-readable table):
 ```text
 Cluster: my-cluster
-Bundle:  hail-0.2.137
+Bundle:  hail-0.2.137-gnomad-3.0.4-r2
 Master:  1.2.3.4 (m2.2xlarge)
 Workers: 3
   worker-01: 10.0.0.2
@@ -1512,6 +1543,8 @@ def reboot(
 4. Given --node master (or any master reference), then error
    "Cannot reboot master node".
 5. After reboot, SSH connectivity verified within 5 minutes.
+6. Given worker does not return SSH connectivity within 5 minutes,
+   then raises `SSHError` with timeout message.
 
 ## J: Cluster Destruction
 
@@ -1551,9 +1584,6 @@ def destroy(
    runs.
 3. Given incorrect name at prompt, then abort with "Aborted" message.
 4. After destroy, floating IP released.
-5. Given volumes.preserve_on_destroy=true, then volume persists
-   after destroy.
-6. Given volumes.preserve_on_destroy=false, then volume deleted.
 
 ## K: Authentication Conversion
 
@@ -1771,8 +1801,9 @@ Sections:
    and example invocations:
    - create, destroy, reboot, build-image, install, status,
      convert-auth.
-6. **Compatibility Bundles** - How to list bundles, select one,
-   what each field means.
+6. **Compatibility Bundles** - Flat bundle structure with revision
+   scheme for security-patched variants, how to list bundles,
+   select one, what each field means.
 7. **Volume Management** - Creating vs attaching, LUKS encryption,
    NFS, preserve on destroy.
 8. **Security** - Security groups, SSL, basic auth, SSH keys.

@@ -35,9 +35,10 @@ Generate bash script that configures /etc/hosts, enables systemd
 services (hdfs-namenode, yarn-rm, mapred-history, spark-master,
 spark-history-server, jupyter-lab, nginx, nfs-server if volume,
 netdata if monitoring), creates nginx reverse proxy with /jupyter,
-/spark, /sparkhist, /yarn, /mapreduce, /netdata paths, sets up
-htpasswd and SSL, configures LUKS if volume attached, creates
-NFS export. Covering all 15 acceptance tests from D3.
+/spark, /sparkhist, /yarn, /mapreduce, /hdfs, /nm<NN>,
+/netdata paths, sets up htpasswd and SSL, configures LUKS if
+volume attached, creates NFS export. Covering all 16 acceptance
+tests from D3.
 
 - [ ] implemented
 - [ ] reviewed
@@ -51,7 +52,7 @@ Generate bash script that configures /etc/hosts, enables systemd
 services (hdfs-datanode, yarn-nm, spark-worker, netdata if
 monitoring), waits for master NFS port, mounts shared data,
 configures netdata streaming to master if enabled. Covering
-all 6 acceptance tests from D4.
+all 8 acceptance tests from D4.
 
 - [ ] implemented
 - [ ] reviewed
@@ -90,9 +91,9 @@ spec.md section: L1
 Enhance cloud-init generation in pulumi/cloud_init.py to include
 Netdata configuration when monitoring="netdata". Master enables
 stream accept with random UUID4 API key. Workers configured as
-stream clients pointing to master. Both master and worker scripts
-include HDFS JMX endpoint config and health alarms. Nginx proxies
-/netdata. Covering all 6 acceptance tests from L1.
+stream clients pointing to master. Master Netdata config includes
+HDFS JMX endpoint monitoring and health alarms for HDFS capacity.
+Nginx proxies /netdata. Covering all 6 acceptance tests from L1.
 
 - [ ] implemented
 - [ ] reviewed

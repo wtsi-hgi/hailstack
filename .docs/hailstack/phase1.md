@@ -28,7 +28,7 @@ spec.md section: A2
 
 Implement `load_config()` function in config/parser.py. Load TOML
 via tomllib, parse into Pydantic ClusterConfig model. Validate
-cluster name regex and handle syntax errors. Covering all 7
+cluster name regex and handle syntax errors. Covering all 6
 acceptance tests from A2.
 
 - [ ] implemented
@@ -66,10 +66,13 @@ with Sanger defaults. Covering all 14 acceptance tests from B1.
 spec.md section: C1
 
 Implement CompatibilityMatrix class in config/compatibility.py.
-Parse bundles.toml (repo root) with [hail."<version>"] sections.
-Derive bundle id as "hail-<version>". Implement get_bundle(),
-get_default(), list_bundles() methods returning Bundle Pydantic
-models. Covering all 6 acceptance tests from C1.
+Parse bundles.toml (repo root) with flat [bundle."<id>"] sections.
+Bundle IDs follow the pattern hail-<hail_ver>-gnomad-<gnomad_ver>-r<revision>
+(e.g. "hail-0.2.137-gnomad-3.0.4-r2"). Each bundle has explicit
+hail, spark, hadoop, java, python, scala, gnomad, and status fields.
+Implement get_bundle(), get_default(), list_bundles() methods
+returning Bundle Pydantic models. Covering all 8 acceptance tests
+from C1.
 
 - [ ] implemented
 - [ ] reviewed

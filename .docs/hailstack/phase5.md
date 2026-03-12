@@ -20,7 +20,7 @@ Load config, resolve Pulumi stack nodes, merge inline + file
 package lists, validate environment, run Ansible playbook,
 collect per-node results. Retry with exponential backoff
 (1/2/4s, 3 attempts) on node failures. Record rollout manifest
-to S3. Covering all 12 acceptance tests from G1.
+to S3. Covering all 13 acceptance tests from G1.
 
 - [ ] implemented
 - [ ] reviewed
@@ -94,7 +94,7 @@ spec.md section: I1
 Implement reboot() command in commands/reboot.py. Default: reboot
 all workers. --node: specific worker. Error on master references.
 SSH to node(s), run sudo reboot, wait for SSH connectivity to
-return (up to 5 min, with backoff retry). Covering all 5
+return (up to 5 min, with backoff retry). Covering all 6
 acceptance tests from I1.
 
 - [ ] implemented

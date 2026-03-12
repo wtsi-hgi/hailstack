@@ -32,8 +32,8 @@ Implement destroy() command in commands/destroy.py. Show Pulumi
 preview, prompt "Do you want to destroy cluster '<name>'? Type
 the cluster name to confirm:". Accept only exact match. If
 --dry-run, show plan only. On confirmed destroy, run Pulumi
-destroy, release floating IP, handle volume preservation.
-Covering all 6 acceptance tests from J1.
+destroy, release floating IP. Covering all 4 acceptance tests
+from J1.
 
 - [ ] implemented
 - [ ] reviewed
