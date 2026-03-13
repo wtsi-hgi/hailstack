@@ -19,7 +19,8 @@ and build_image() function in packer/builder.py. Load config,
 resolve bundle (or use --bundle override), query Glance for base
 image, run Packer build with version variables, upload built
 image to Glance as hailstack-<bundle-id>. Requires Phase 1
-(config + matrix). Covering all 15 acceptance tests from E1.
+(config + matrix). Log progress to stderr for each stage.
+Covering all 16 acceptance tests from E1.
 
 - [ ] implemented
 - [ ] reviewed

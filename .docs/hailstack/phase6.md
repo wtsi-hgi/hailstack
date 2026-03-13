@@ -54,11 +54,6 @@ acceptance tests from M3.
 - [ ] implemented
 - [ ] reviewed
 
-For parallel batch items, use separate subagents per item.
-Launch review subagents using the `python-reviewer` skill
-(review all items in the batch together in a single review
-pass).
-
 ### Batch 2 (parallel, after batch 1 is reviewed)
 
 #### Item 6.4: O1 - Pulumi integration tests [parallel with 6.5, 6.6]
@@ -80,10 +75,10 @@ from O1.
 spec.md section: O2
 
 Create tests/integration/test_packer_scripts.py. Verify each
-provisioner script ends with version-check command. Mock
-environment with version vars. Test scripts/base.sh and each
-scripts/ubuntu/*.sh in isolation exits 0. Covering all 2
-acceptance tests from O2.
+provisioner script in packer/scripts/ubuntu/ ends with
+version-check command. Mock environment with version vars.
+Test scripts/base.sh exits 0. Covering all 2 acceptance
+tests from O2.
 
 - [ ] implemented
 - [ ] reviewed
@@ -101,8 +96,3 @@ Covering all 3 acceptance tests from O3.
 
 - [ ] implemented
 - [ ] reviewed
-
-For parallel batch items, use separate subagents per item.
-Launch review subagents using the `python-reviewer` skill
-(review all items in the batch together in a single review
-pass).

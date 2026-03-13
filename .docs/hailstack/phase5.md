@@ -20,7 +20,8 @@ Load config, resolve Pulumi stack nodes, merge inline + file
 package lists, validate environment, run Ansible playbook,
 collect per-node results. Retry with exponential backoff
 (1/2/4s, 3 attempts) on node failures. Record rollout manifest
-to S3. Covering all 13 acceptance tests from G1.
+to S3. Log progress to stderr for each stage. Covering all
+14 acceptance tests from G1.
 
 - [ ] implemented
 - [ ] reviewed

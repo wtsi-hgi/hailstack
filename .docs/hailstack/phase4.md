@@ -15,11 +15,17 @@ skills.
 spec.md section: D1
 
 Implement create() command in commands/create.py. Wire to Pulumi
-stack: load config, validate, resolve bundle, query Glance for
-image, run Pulumi preview if --dry-run, else Pulumi up. Check
-ceph_s3 credentials before Pulumi calls. Output master/worker
-IPs on success. Handle ImageNotFoundError and S3Error. Covering
-all 7 acceptance tests from D1.
+stack: load config, validate, resolve bundle, run pre-flight
+resource validation (query OpenStack for image, flavours, network,
+compute/volume quotas, floating IP availability, existing volume
+existence; collect all failures into single error), run Pulumi
+preview if --dry-run, else Pulumi up. Check ceph_s3 credentials
+before Pulumi calls. On success, print master floating IP
+prominently as final stdout line. On Pulumi up failure, run
+automatic cleanup (Pulumi destroy) so no orphaned resources
+remain. Log progress to stderr for each stage. Handle
+ImageNotFoundError, ResourceNotFoundError, QuotaExceededError,
+and S3Error. Covering all 17 acceptance tests from D1.
 
 - [ ] implemented
 - [ ] reviewed
@@ -32,8 +38,10 @@ Implement destroy() command in commands/destroy.py. Show Pulumi
 preview, prompt "Do you want to destroy cluster '<name>'? Type
 the cluster name to confirm:". Accept only exact match. If
 --dry-run, show plan only. On confirmed destroy, run Pulumi
-destroy, release floating IP. Covering all 4 acceptance tests
-from J1.
+destroy, release floating IP. Log progress to stderr for each
+stage. On success, final stdout line is
+"Cluster '<name>' destroyed.". Covering all 6 acceptance
+tests from J1.
 
 - [ ] implemented
 - [ ] reviewed

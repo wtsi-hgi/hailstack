@@ -37,8 +37,11 @@ spark-history-server, jupyter-lab, nginx, nfs-server if volume,
 netdata if monitoring), creates nginx reverse proxy with /jupyter,
 /spark, /sparkhist, /yarn, /mapreduce, /hdfs, /nm<NN>,
 /netdata paths, sets up htpasswd and SSL, configures LUKS if
-volume attached, creates NFS export. Covering all 16 acceptance
-tests from D3.
+volume attached, creates NFS export. Writes config files to
+dedicated paths (e.g. /etc/nginx/sites-enabled/hailstack.conf,
+/etc/hadoop/conf/, /etc/spark/conf/) and never overwrites
+package-managed defaults. Covering all 18 acceptance tests
+from D3.
 
 - [ ] implemented
 - [ ] reviewed
@@ -51,8 +54,10 @@ Implement generate_worker_cloud_init() in pulumi/cloud_init.py.
 Generate bash script that configures /etc/hosts, enables systemd
 services (hdfs-datanode, yarn-nm, spark-worker, netdata if
 monitoring), waits for master NFS port, mounts shared data,
-configures netdata streaming to master if enabled. Covering
-all 8 acceptance tests from D4.
+configures netdata streaming to master if enabled. Writes
+config files to dedicated paths and does not overwrite
+package-managed defaults. Covering all 9 acceptance tests
+from D4.
 
 - [ ] implemented
 - [ ] reviewed

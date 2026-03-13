@@ -98,3 +98,22 @@ A clear fool-proof no-technical-ability README should be specified as part of th
 * Existing clusters with bundles removed from the compatibility matrix can still operate (install, status, reboot, destroy). Only `create` and `build-image` validate against the current matrix.
 * On cluster destroy, floating IPs are always released back to the pool.
 * The compatibility matrix must support the same Hail+Gnomad version pair with multiple different underlying component versions (e.g. security-patched Spark/Hadoop). This enables both exact reproducibility of previous clusters and security-patched variants. The matrix uses flat bundles under `[bundle."<id>"]` keys with explicit human-friendly IDs that encode the key information. Bundle IDs follow the pattern `hail-<hail_ver>-gnomad-<gnomad_ver>-r<revision>`, e.g. `hail-0.2.137-gnomad-3.0.4-r2`. Each bundle explicitly lists all component versions (hail, spark, hadoop, java, python, scala, gnomad). The `hail` and `gnomad` fields are explicit in the TOML (not derived from the key). The revision suffix (`-r1`, `-r2`, etc.) distinguishes bundles with the same Hail+Gnomad but different infrastructure component versions. The `[default]` section points to the recommended bundle ID. Packer images are named `hailstack-<bundle-id>`. The old hierarchical `[hail."<version>"]` keying is replaced by this flat `[bundle."<id>"]` structure.
+
+## User Requirements (priority over any contradictory prior notes)
+
+The following requirements come from an end-user of the existing tool
+and take priority over any contradictory prior notes:
+
+* Launch a cluster from command line
+* check resources requested and report if any are not available
+* in cases where resources are not available the error message should be helpful and say what is unavailble
+* the optional ability to attach a volume
+* caching of hadoop to save time
+* configurable for different versions of hail and spark
+* not writing config files to disk that can over-write inbuilt config (this currently happens)
+* gnomad python package and all its dependencies should be installed to master and all workers as standard
+* when building a cluster fails it should remove every trace of the failed cluster so that resources become available again
+* there needs to be an option to destroy existing clusters when we have finished with them
+* when running progress should be logged clearly to the command line
+* when it completes the IP assigned to the cluster should be clearly included in the logging
+* it would be nice to be able to install any other python packages we desire on master and all workers

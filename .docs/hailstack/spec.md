@@ -168,11 +168,20 @@ class S3Error(HailstackError): ...
 class PackerError(HailstackError): ...
 class SSHError(HailstackError): ...
 class ImageNotFoundError(HailstackError): ...
+class ResourceNotFoundError(HailstackError): ...
+class QuotaExceededError(HailstackError): ...
 ```
 
 **Error policy:** Validation errors raise immediately. Network/SSH errors
 retry with exponential backoff (1/2/4s, 3 attempts). All errors logged
 to stderr via `logging` module. No bare `except:`.
+
+**Progress logging:** All commands log progress to stderr via the
+`logging` module at INFO level. Each major stage (config validation,
+resource checks, infrastructure creation, service startup) is logged
+as it begins and completes. On successful cluster creation, the
+master floating IP is printed prominently to stdout as the final
+output line.
 
 ## A: CLI & Entry Point
 
@@ -669,9 +678,22 @@ def validate_bundle(
 As a user, I want `hailstack create --config my.toml [--dry-run]` to
 preview or provision infrastructure.
 
-Workflow: load config -> validate -> resolve bundle -> query Glance
-for image `hailstack-<bundle-id>` -> if `--dry-run`: Pulumi preview
-(no state mutation) -> else: Pulumi up -> output master/worker IPs.
+Workflow: load config -> validate -> resolve bundle -> pre-flight
+resource validation (query OpenStack for image, flavours, network;
+collect all failures) -> if `--dry-run`: Pulumi preview (no state
+mutation) -> else: Pulumi up -> on success: log master floating IP
+prominently -> on failure: automatic cleanup (Pulumi destroy) to
+release all partially-created resources.
+
+Pre-flight validation queries the OpenStack API before any Pulumi
+calls to verify that the requested image, master flavour, worker
+flavour, and network all exist. It also checks OpenStack compute
+and volume quotas to confirm sufficient capacity for the requested
+instances, vCPUs, RAM, and volume storage. If `floating_ip` is
+specified, it verifies the IP exists and is not already associated.
+If `volumes.existing_volume_id` is specified, it verifies the
+volume exists. All failures are collected and reported in a single
+error message so the user can fix everything in one pass.
 
 **Package:** `hailstack/cli/commands/`
 **File:** `commands/create.py`
@@ -710,6 +732,28 @@ def create(
    backend" before any Pulumi calls.
 7. Given ceph_s3 credentials invalid (auth failure), then raises
    `S3Error` with clear message including endpoint name.
+8. Given master_flavour not found in OpenStack, then raises
+   `ResourceNotFoundError` naming the unavailable flavour.
+9. Given network_name not found in OpenStack, then raises
+   `ResourceNotFoundError` naming the unavailable network.
+10. Given image missing AND flavour missing, then single
+    `ResourceNotFoundError` listing both unavailable resources.
+11. Given Pulumi up fails mid-creation, then automatic cleanup
+    runs (Pulumi destroy) so no orphaned resources remain.
+12. On successful create, final stdout line is
+    "Cluster '<name>' created. Master IP: <floating-ip>".
+13. During create, progress messages logged to stderr for each
+    stage: config loaded, bundle resolved, pre-flight passed,
+    creating infrastructure, cluster ready.
+14. Given compute quota insufficient for requested instances, then
+    raises `QuotaExceededError` naming the exceeded quota
+    (e.g. "instances: need 5, available 2").
+15. Given `floating_ip = "1.2.3.4"` but IP not found or already
+    associated, then `ResourceNotFoundError` naming the IP.
+16. Given `volumes.existing_volume_id` set but volume not found,
+    then `ResourceNotFoundError` naming the volume ID.
+17. Given flavour missing AND quota exceeded, then single error
+    listing both the unavailable flavour and the quota breach.
 
 ### D2: Pulumi stack and OpenStack resources
 
@@ -815,7 +859,11 @@ Master cloud-init enables these systemd services:
 - `netdata` (if monitoring=netdata)
 
 All software is pre-installed in the Packer image. Cloud-init only
-generates cluster-specific config and starts services.
+generates cluster-specific config and starts services. Cloud-init
+writes config files to dedicated paths (e.g.
+`/etc/nginx/sites-enabled/hailstack.conf`,
+`/etc/hadoop/conf/core-site.xml`) and never overwrites
+package-managed default config files.
 
 Nginx reverse proxy paths (all behind basic auth on HTTP/HTTPS):
 | Path | Backend | Notes |
@@ -892,6 +940,12 @@ def generate_worker_cloud_init(
     properties.
 16. Given lustre_network set, then cloud-init configures
     /lustre mount point on master.
+17. Nginx config written to `/etc/nginx/sites-enabled/hailstack.conf`;
+    cloud-init output does NOT reference `/etc/nginx/nginx.conf`.
+18. Hadoop/Spark config written under `/etc/hadoop/conf/` and
+    `/etc/spark/conf/`; cloud-init does not overwrite
+    package-managed defaults (e.g. no writes to
+    `/etc/hadoop/hadoop-env.sh` or `/etc/default/hadoop`).
 
 ### D4: Cloud-init provisioning (workers)
 
@@ -905,6 +959,10 @@ Worker cloud-init enables:
 
 Workers wait for master NFS (port 2049) before mounting
 /home/<ssh_username>/data.
+
+**Package:** `hailstack/pulumi/`
+**File:** `pulumi/cloud_init.py`
+**Test file:** `tests/pulumi/test_cloud_init.py`
 
 **Acceptance tests:**
 
@@ -922,6 +980,9 @@ Workers wait for master NFS (port 2049) before mounting
    cloud-init includes apt-get install of those packages.
 8. Given extras.python_packages=["pandas"], then worker cloud-init
    includes uv pip install into the overlay venv.
+9. Worker cloud-init writes config files to dedicated paths
+   (e.g. `/etc/hadoop/conf/core-site.xml`) and does not
+   overwrite package-managed defaults.
 
 ### D5: Floating IP management
 
@@ -930,6 +991,7 @@ use existing IP. On destroy, always release.
 
 **Package:** `hailstack/pulumi/`
 **File:** `pulumi/resources.py`
+**Test file:** `tests/pulumi/test_resources.py`
 
 **Acceptance tests:**
 
@@ -1042,6 +1104,9 @@ def build_image_cmd(
     specifying bundle `hail-0.2.137-gnomad-3.0.4-r2`, then image
     built for `hail-0.2.136-gnomad-3.0.4-r1` (CLI override takes
     precedence).
+16. During build-image, progress messages logged to stderr for
+    each stage: config loaded, bundle resolved, Packer starting,
+    image uploaded.
 
 ### E2: Packer template structure
 
@@ -1112,7 +1177,7 @@ build {
    `scripts/base.sh` and `scripts/ubuntu/{packages,hadoop,spark,
    hail,jupyter,gnomad,uv,netdata}.sh`.
 4. Built image contains base Python venv at
-   `/opt/hailstack/base-venv` with Hail, PySpark, Jupyter, and
+   `/opt/hailstack/base-venv` with Hail, PySpark, JupyterLab, and
    Gnomad pre-installed via uv.
 
 ## F: Volume Management
@@ -1169,7 +1234,7 @@ Mount path: /lustre.
 ## G: Post-Creation Software Installation
 
 The `install` command adds supplementary system and Python packages
-to running clusters — packages outside the bundle (e.g. pandas,
+to running clusters -- packages outside the bundle (e.g. pandas,
 libpq-dev). It does not modify bundle components (Spark, Hadoop,
 Hail); changing those requires `destroy` + `create` with a new
 bundle (see Appendix: Key Decisions).
@@ -1271,6 +1336,9 @@ def install(
     changes).
 13. Given `--ssh-key /path/to/key`, then Ansible uses that key for
     SSH connections to all nodes.
+14. During install, progress messages logged to stderr for each
+    stage: config loaded, resolving nodes, running Ansible,
+    verifying packages, uploading rollout manifest.
 
 ### G2: Ansible runner for installs
 
@@ -1300,17 +1368,17 @@ Ansible playbook with roles/packages role. Tasks:
 - Install Python packages via `command` module running
   `uv pip install` into the overlay venv at
   `/opt/hailstack/overlay-venv` (not the base venv). The base venv
-  at `/opt/hailstack/base-venv` (with Hail, PySpark, Jupyter,
-  Gnomad) remains immutable.
+  at `/opt/hailstack/base-venv` (with Hail, PySpark, JupyterLab,
+  and Gnomad) remains immutable.
 
 Python environment strategy:
 - **Base venv** (`/opt/hailstack/base-venv`): created by Packer,
-  contains core stack (Hail, PySpark, Jupyter, Gnomad). Never
-  modified post-image-creation.
+  contains core stack (Hail, PySpark, JupyterLab, and Gnomad).
+  Never modified post-image-creation.
 - **Overlay venv** (`/opt/hailstack/overlay-venv`): created on first
   need -- either by cloud-init when `extras.python_packages` is
   non-empty, or by the first `install` invocation, whichever comes
-  first, inherits base venv packages via
+  first. Inherits base venv packages via
   `--system-site-packages`, receives user-installed packages.
   Users' Python code can import from both.
 
@@ -1590,6 +1658,11 @@ def destroy(
    runs.
 3. Given incorrect name at prompt, then abort with "Aborted" message.
 4. After destroy, floating IP released.
+5. During destroy, progress messages logged to stderr for each
+   stage: config loaded, previewing resources, awaiting
+   confirmation, destroying infrastructure, cleanup complete.
+6. On successful destroy, final stdout line is
+   "Cluster '<name>' destroyed.".
 
 ## K: Authentication Conversion
 
@@ -2014,7 +2087,7 @@ local state files.
 for bundle-level changes (Spark, Hadoop, Hail, Java versions). Avoids
 in-place upgrade complexity. Data preserved via S3 and optionally
 preserved volumes. The `install` command (section G) handles
-supplementary packages (system and Python) on running clusters —
+supplementary packages (system and Python) on running clusters --
 these are user add-ons outside the bundle, not bundle upgrades.
 
 **Bundle selection:** Users pick from named presets (not individual
