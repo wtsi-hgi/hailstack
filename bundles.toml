@@ -1,0 +1,36 @@
+[default]
+bundle = "hail-0.2.137-gnomad-3.0.4-r2"
+
+# Flat bundles with explicit IDs.
+# Revision suffix distinguishes bundles sharing the same
+# Hail+Gnomad pair but with different infrastructure versions.
+
+[bundle."hail-0.2.137-gnomad-3.0.4-r1"]
+hail = "0.2.137"
+spark = "3.5.4"
+hadoop = "3.4.0"
+java = "11"
+python = "3.12"
+scala = "2.12.18"
+gnomad = "3.0.4"
+status = "supported"
+
+[bundle."hail-0.2.137-gnomad-3.0.4-r2"]
+hail = "0.2.137"
+spark = "3.5.6"
+hadoop = "3.4.1"
+java = "11"
+python = "3.12"
+scala = "2.12.18"
+gnomad = "3.0.4"
+status = "latest"
+
+[bundle."hail-0.2.136-gnomad-3.0.4-r1"]
+hail = "0.2.136"
+spark = "3.5.4"
+hadoop = "3.4.0"
+java = "11"
+python = "3.12"
+scala = "2.12.18"
+gnomad = "3.0.4"
+status = "supported"

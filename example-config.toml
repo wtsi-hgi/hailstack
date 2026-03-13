@@ -1,0 +1,65 @@
+# Hailstack cluster configuration.
+# Copy this file, adjust values, and pass via --config.
+
+[cluster]
+name = "my-cluster"
+bundle = "hail-0.2.137-gnomad-3.0.4-r2"
+num_workers = 4
+master_flavour = "m2.2xlarge"
+# worker_flavour defaults to master_flavour if omitted
+# worker_flavour = "m2.2xlarge"
+network_name = "cloudforms_network"
+# lustre_network = "lustre_network"
+ssh_username = "ubuntu"
+monitoring = "netdata"
+# floating_ip = "1.2.3.4"
+
+[packer]
+base_image = "ubuntu-22.04"
+flavour = "m2.medium"
+# floating_ip_pool = "public"
+
+[volumes]
+create = true
+name = "my-data-vol"
+size_gb = 500
+preserve_on_destroy = false
+# existing_volume_id = "uuid"
+
+[s3]
+endpoint = "cog.sanger.ac.uk"
+access_key = "$S3A_ACCESS_KEY"
+secret_key = "$S3A_SECRET_KEY"
+
+[ceph_s3]
+endpoint = "cog.sanger.ac.uk"
+bucket = "hailstack-state"
+access_key = "$CEPH_S3_ACCESS_KEY"
+secret_key = "$CEPH_S3_SECRET_KEY"
+
+[ssh_keys]
+public_keys = [
+  "ssh-rsa AAAA... user@host1",
+  "ssh-rsa BBBB... user@host2",
+]
+
+[security_groups.master]
+ssh = true
+http = true
+https = true
+spark_master = true
+jupyter = true
+hdfs = true
+netdata = true
+
+[security_groups.worker]
+hdfs = true
+spark_worker = true
+all_tcp_internal = true
+
+[dns]
+search_domains = "internal.sanger.ac.uk"
+
+[extras]
+system_packages = ["libpq-dev", "mc"]
+python_packages = ["pandas", "scikit-learn"]

@@ -19,8 +19,8 @@ reboot, build-image, install, status, convert-auth). Top-level
 Typer app with --version flag. Covering all 4 acceptance tests
 from A1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.2: A2 - Config file loading and validation
 
@@ -31,8 +31,8 @@ via tomllib, parse into Pydantic ClusterConfig model. Validate
 cluster name regex and handle syntax errors. Covering all 6
 acceptance tests from A2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.3: A3 - Environment variable and .env support
 
@@ -43,8 +43,8 @@ config/parser.py. Support $VAR and ${VAR} syntax in string values.
 Integrate python-dotenv for .env file loading. Covering all 4
 acceptance tests from A3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.4: B1 - Cluster config TOML schema
 
@@ -58,8 +58,8 @@ keys, volume config, monitoring field, num_workers, floating_ip,
 ceph_s3 requirements. Create example-config.toml in repo root
 with Sanger defaults. Covering all 14 acceptance tests from B1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.5: C1 - Matrix structure and bundle query
 
@@ -74,8 +74,8 @@ Implement get_bundle(), get_default(), list_bundles() methods
 returning Bundle Pydantic models. Covering all 8 acceptance tests
 from C1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.6: C2 - Bundle validation at CLI time
 
@@ -87,8 +87,8 @@ default if bundle empty. Only validate for create/build-image
 commands; allow any bundle for other commands. Covering all 4
 acceptance tests from C2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.7: K1 - convert-auth command
 
@@ -100,5 +100,5 @@ from env. Generate clouds.yaml YAML output. Support --write flag
 to write to ~/.config/openstack/clouds.yaml with backup of
 existing file. Covering all 6 acceptance tests from K1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

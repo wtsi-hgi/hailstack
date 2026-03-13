@@ -22,8 +22,8 @@ image to Glance as hailstack-<bundle-id>. Requires Phase 1
 (config + matrix). Log progress to stderr for each stage.
 Covering all 16 acceptance tests from E1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.2: E2 - Packer template structure
 
@@ -36,5 +36,5 @@ scripts/base.sh and scripts/ubuntu/{packages,hadoop,spark,hail,
 jupyter,gnomad,uv,netdata}.sh. Each script includes version
 checks. Covering all 4 acceptance tests from E2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

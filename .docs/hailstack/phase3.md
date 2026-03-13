@@ -23,8 +23,8 @@ master_private_ip, worker_private_ips, worker_names,
 cluster_name, bundle_id. Covering all 10 acceptance tests
 from D2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.2: D3 - Cloud-init provisioning (master)
 
@@ -43,8 +43,8 @@ dedicated paths (e.g. /etc/nginx/sites-enabled/hailstack.conf,
 package-managed defaults. Covering all 18 acceptance tests
 from D3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.3: D4 - Cloud-init provisioning (workers)
 
@@ -59,8 +59,8 @@ config files to dedicated paths and does not overwrite
 package-managed defaults. Covering all 9 acceptance tests
 from D4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.4: D5 - Floating IP management
 
@@ -72,7 +72,7 @@ and associate to master. If floating_ip provided, use that
 address. On destroy, release FIP to pool. Covering all 3
 acceptance tests from D5.
 
-- [ ] implemented
+- [x] implemented
 - [ ] reviewed
 
 ### Item 3.5: F1 - Volume lifecycle via Pulumi
