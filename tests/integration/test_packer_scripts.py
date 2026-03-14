@@ -66,6 +66,52 @@ def _write_stub_command(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _python_stub_body() -> str:
+    """Return a python stub that can create a minimal virtual environment."""
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then\n'
+        '  if [[ "${3:-}" == "--system-site-packages" ]]; then\n'
+        "    target=$4\n"
+        "  else\n"
+        "    target=$3\n"
+        "  fi\n"
+        '  mkdir -p "$target/bin"\n'
+        '  mkdir -p "$target/lib/python/site-packages"\n'
+        "  cat >\"$target/bin/python\" <<'EOF'\n"
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then\n'
+        '  if [[ "${3:-}" == "--system-site-packages" ]]; then\n'
+        "    target=$4\n"
+        "  else\n"
+        "    target=$3\n"
+        "  fi\n"
+        '  mkdir -p "$target/bin"\n'
+        '  mkdir -p "$target/lib/python/site-packages"\n'
+        '  cp "$0" "$target/bin/python"\n'
+        '  chmod +x "$target/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "${1:-}" == "-c" && "${2:-}" == '
+        "*\"sysconfig.get_path('purelib')\"* ]]; then\n"
+        '  script_dir=$(cd "$(dirname "$0")" && pwd)\n'
+        '  printf "%s\\n" "${script_dir%/bin}/lib/python/site-packages"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+        "EOF\n"
+        '  chmod +x "$target/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
 def _rewrite_base_script(path: Path, temp_root: Path) -> Path:
     """Copy base.sh into a temporary tree and rewrite absolute system paths."""
     rewritten = path.read_text(encoding="utf-8")
@@ -113,6 +159,14 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
         "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
     )
     _write_stub_command(
+        bin_dir / "apt-cache",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+    _write_stub_command(
+        bin_dir / "add-apt-repository",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+    _write_stub_command(
         bin_dir / "systemctl",
         "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
     )
@@ -135,23 +189,11 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
     )
     _write_stub_command(
         bin_dir / "python3",
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then\n'
-        "  target=$3\n"
-        '  mkdir -p "$target/bin"\n'
-        "  cat >\"$target/bin/python\" <<'EOF'\n"
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then\n'
-        "  exit 0\n"
-        "fi\n"
-        "exit 0\n"
-        "EOF\n"
-        '  chmod +x "$target/bin/python"\n'
-        "  exit 0\n"
-        "fi\n"
-        "exit 0\n",
+        _python_stub_body(),
+    )
+    _write_stub_command(
+        bin_dir / "python3.12",
+        _python_stub_body(),
     )
 
     script_path = _rewrite_base_script(BASE_SCRIPT_PATH, temp_root)

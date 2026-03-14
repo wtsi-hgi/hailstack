@@ -110,8 +110,7 @@ def test_build_image_validates_bundle_at_command_time(
 ) -> None:
     """Fail build-image before any Packer work when bundle is unknown."""
     del command_matrix
-    config_path = _write_config(
-        tmp_path / "build-image.toml", "removed-bundle")
+    config_path = _write_config(tmp_path / "build-image.toml", "removed-bundle")
 
     result = runner.invoke(app, ["build-image", "--config", str(config_path)])
 

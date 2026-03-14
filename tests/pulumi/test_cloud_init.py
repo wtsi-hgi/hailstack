@@ -24,6 +24,7 @@
 """Acceptance tests for D3 master cloud-init generation."""
 
 import re
+from shlex import quote
 
 import pytest
 
@@ -110,6 +111,7 @@ def test_monitoring_netdata_enables_netdata_service(
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
     assert "systemctl enable netdata" in result
+    assert "systemctl restart netdata || systemctl start netdata" in result
 
 
 def test_master_cloud_init_enables_hailstack_jupyter_service(
@@ -120,7 +122,8 @@ def test_master_cloud_init_enables_hailstack_jupyter_service(
 
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
-    assert "systemctl enable hailstack-jupyterlab" in result
+    assert "systemctl enable jupyter-lab" in result
+    assert "systemctl restart jupyter-lab || systemctl start jupyter-lab" in result
 
 
 def test_l1_master_netdata_enables_service_and_stream_accept(
@@ -132,6 +135,7 @@ def test_l1_master_netdata_enables_service_and_stream_accept(
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
     assert "systemctl enable netdata" in result
+    assert "systemctl restart netdata || systemctl start netdata" in result
     assert "/etc/netdata/stream.conf" in result
     assert "[stream]" in result
     assert "enabled = yes" in result
@@ -318,18 +322,49 @@ def test_web_password_creates_htpasswd_and_ssl_assets(
 
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
-    assert (
-        "htpasswd -bc /etc/nginx/.hailstack-htpasswd hailstack 'web-secret'" in result
-    )
+    assert "htpasswd -bc /etc/nginx/.hailstack-htpasswd hailstack web-secret" in result
     assert "openssl req -x509 -nodes -days 3650" in result
     assert "/etc/nginx/ssl/hailstack.crt" in result
     assert "/etc/nginx/ssl/hailstack.key" in result
+
+
+def test_web_password_is_shell_quoted_for_htpasswd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell-quote the htpasswd password so special characters survive cloud-init."""
+    password = "pa ss$word'with\"chars"
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", password)
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert (
+        f"htpasswd -bc /etc/nginx/.hailstack-htpasswd hailstack {quote(password)}"
+        in result
+    )
 
 
 def test_missing_web_password_raises_config_error() -> None:
     """Reject master cloud-init generation without the required web password."""
     with pytest.raises(ConfigError, match="HAILSTACK_WEB_PASSWORD required"):
         generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+
+def test_destroy_rehydration_can_render_without_runtime_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow destroy-time graph rehydration without create-only secret env vars."""
+    monkeypatch.delenv("HAILSTACK_WEB_PASSWORD", raising=False)
+    monkeypatch.delenv("HAILSTACK_VOLUME_PASSWORD", raising=False)
+
+    result = generate_master_cloud_init(
+        _config(volumes={"create": True, "size_gb": 500}),
+        _bundle(),
+        _worker_ips(),
+        allow_missing_runtime_secrets=True,
+    )
+
+    assert "destroy-only-web-password" in result
+    assert "destroy-only-volume-password" in result
 
 
 def test_volume_enabled_adds_luks_and_nfs_export(
@@ -343,15 +378,29 @@ def test_volume_enabled_adds_luks_and_nfs_export(
         _config(volumes={"create": True, "size_gb": 500}),
         _bundle(),
         _worker_ips(),
+        attached_volume_id="volume-123",
     )
 
-    assert "cryptsetup luksFormat /dev/vdb /etc/hailstack/volume.key" in result
+    assert "/etc/hailstack/volume-device" in result
+    assert 'ATTACHED_VOLUME_ID="volume-123"' in result
+    assert "lsblk -ndo PATH,SERIAL,TYPE" in result
+    assert (
+        "Unable to detect attached data volume for volume ID $ATTACHED_VOLUME_ID"
+        in result
+    )
+    assert 'cryptsetup isLuks "$VOLUME_DEVICE"' in result
     assert "mkfs.ext4 /dev/mapper/hailstack-data" in result
     assert (
         "mountpoint -q /home/ubuntu/data || mount /dev/mapper/hailstack-data "
         "/home/ubuntu/data" in result
     )
+    assert (
+        "grep -q '^hailstack-data ' /etc/crypttab || echo "
+        '"hailstack-data UUID=$(cat /etc/hailstack/volume-uuid) '
+        '/etc/hailstack/volume.key luks" >> /etc/crypttab' in result
+    )
     assert "systemctl enable nfs-server" in result
+    assert "systemctl restart nfs-server || systemctl start nfs-server" in result
     assert (
         "echo '/home/ubuntu/data *(rw,sync,no_subtree_check,no_root_squash)'"
         " > /etc/exports.d/hailstack.exports" in result
@@ -369,17 +418,24 @@ def test_existing_volume_reuses_encrypted_filesystem_without_reformatting(
         _config(volumes={"existing_volume_id": "volume-123"}),
         _bundle(),
         _worker_ips(),
+        attached_volume_id="volume-123",
     )
 
     assert (
-        "cryptsetup open /dev/vdb hailstack-data --key-file "
-        "/etc/hailstack/volume.key" in result
+        'cryptsetup open "$(cat /etc/hailstack/volume-device)" '
+        "hailstack-data --key-file /etc/hailstack/volume.key" in result
     )
     assert (
         "mountpoint -q /home/ubuntu/data || mount /dev/mapper/hailstack-data "
         "/home/ubuntu/data" in result
     )
+    assert (
+        "grep -q '^hailstack-data ' /etc/crypttab || echo "
+        '"hailstack-data UUID=$(cat /etc/hailstack/volume-uuid) '
+        '/etc/hailstack/volume.key luks" >> /etc/crypttab' in result
+    )
     assert "systemctl enable nfs-server" in result
+    assert "systemctl restart nfs-server || systemctl start nfs-server" in result
     assert "cryptsetup luksFormat /dev/vdb /etc/hailstack/volume.key" not in result
     assert "mkfs.ext4 /dev/mapper/hailstack-data" not in result
 
@@ -395,6 +451,7 @@ def test_volume_password_is_written_to_the_luks_keyfile(
         _config(volumes={"create": True, "size_gb": 500}),
         _bundle(),
         _worker_ips(),
+        attached_volume_id="volume-123",
     )
 
     assert "cat <<'EOF_VOLUME_KEY' > /etc/hailstack/volume.key" in result
@@ -418,10 +475,46 @@ def test_missing_volume_password_raises_config_error_when_volume_enabled(
         )
 
 
+def test_master_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare local HDFS and Spark directories even when no shared volume exists."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+    )
+
+    assert "install -d -m 0755 /home/ubuntu/data /home/ubuntu/data/hdfs" in result
+    assert "/home/ubuntu/data/hdfs/name" in result
+    assert "/home/ubuntu/data/spark-history" in result
+    assert "hdfs namenode -format -nonInteractive" in result
+
+
+def test_worker_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare worker HDFS data directories before starting the DataNode."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_worker_cloud_init(
+        _config(),
+        _bundle(),
+        "10.0.0.10",
+        1,
+        _worker_ips(),
+    )
+
+    assert "install -d -m 0755 /home/ubuntu/data /home/ubuntu/data/hdfs" in result
+    assert "/home/ubuntu/data/hdfs/data" in result
+
+
 def test_dns_search_domain_updates_resolv_conf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Write the configured DNS search domain into resolv.conf."""
+    """Persist the configured DNS search domain via systemd-resolved."""
     monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
 
     result = generate_master_cloud_init(
@@ -430,8 +523,9 @@ def test_dns_search_domain_updates_resolv_conf(
         _worker_ips(),
     )
 
-    assert "search internal.sanger.ac.uk" in result
-    assert "/etc/resolv.conf" in result
+    assert "/etc/systemd/resolved.conf.d/99-hailstack-search-domains.conf" in result
+    assert "Domains=internal.sanger.ac.uk" in result
+    assert "systemctl restart systemd-resolved || true" in result
 
 
 def test_extras_system_packages_are_installed_with_apt(
@@ -469,6 +563,33 @@ def test_extras_python_packages_are_installed_into_overlay_venv(
     assert (
         "uv pip install --python /opt/hailstack/overlay-venv/bin/python pandas"
         in result
+    )
+
+
+def test_extras_python_packages_are_shell_quoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quote Python requirement arguments so shell metacharacters are preserved."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(
+            extras={
+                "python_packages": [
+                    "pandas>=2.0",
+                    "package[extra]",
+                    "git+https://example.invalid/pkg.whl",
+                ]
+            }
+        ),
+        _bundle(),
+        _worker_ips(),
+    )
+
+    assert (
+        "uv pip install --python /opt/hailstack/overlay-venv/bin/python "
+        f"{quote('pandas>=2.0')} {quote('package[extra]')} "
+        f"{quote('git+https://example.invalid/pkg.whl')}" in result
     )
 
 
@@ -554,9 +675,44 @@ def test_lustre_network_configures_lustre_mount_point(
 
     assert "install -d -m 0755 /lustre" in result
     assert (
-        "echo '10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0'"
-        " >> /etc/fstab" in result
+        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
+        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
+        in result
     )
+    assert "mountpoint -q /lustre || mount /lustre" in result
+
+
+def test_lustre_network_uses_configured_mount_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render the configured Lustre target instead of a hardcoded endpoint."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(
+            cluster={
+                "name": "test-cluster",
+                "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+                "num_workers": 3,
+                "master_flavour": "m2.2xlarge",
+                "worker_flavour": "m2.xlarge",
+                "network_name": "private-net",
+                "lustre_network": "lustre-net",
+                "lustre_mount_target": "192.0.2.10@tcp:/custom",
+                "ssh_username": "ubuntu",
+                "monitoring": "netdata",
+            }
+        ),
+        _bundle(),
+        _worker_ips(),
+    )
+
+    assert (
+        "grep -q '^192.0.2.10@tcp:/custom /lustre lustre ' /etc/fstab || echo "
+        "'192.0.2.10@tcp:/custom /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
+        in result
+    )
+    assert "mountpoint -q /lustre || mount /lustre" in result
 
 
 def test_nginx_config_is_written_only_to_sites_enabled_path(
@@ -582,6 +738,7 @@ def test_hadoop_and_spark_config_use_dedicated_conf_directories(
     assert "/etc/hadoop/conf/core-site.xml" in result
     assert "/etc/hadoop/conf/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
+    assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/hadoop/hadoop-env.sh" not in result
     assert "/etc/default/hadoop" not in result
 
@@ -591,6 +748,7 @@ def test_worker_cloud_init_enables_spark_worker_service() -> None:
     result = generate_worker_cloud_init(_config(), _bundle(), _master_ip(), 2)
 
     assert "systemctl enable spark-worker" in result
+    assert "systemctl restart spark-worker || systemctl start spark-worker" in result
 
 
 def test_worker_hosts_block_contains_master_and_all_workers() -> None:
@@ -644,6 +802,7 @@ def test_worker_monitoring_netdata_enables_streaming_to_master() -> None:
     result = generate_worker_cloud_init(_config(), _bundle(), _master_ip(), 1)
 
     assert "systemctl enable netdata" in result
+    assert "systemctl restart netdata || systemctl start netdata" in result
     assert "/etc/netdata/stream.conf" in result
     assert "destination = 10.0.0.10:19999" in result
 
@@ -709,9 +868,11 @@ def test_worker_lustre_network_configures_lustre_mount_point() -> None:
 
     assert "install -d -m 0755 /lustre" in result
     assert (
-        "echo '10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0'"
-        " >> /etc/fstab" in result
+        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
+        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
+        in result
     )
+    assert "mountpoint -q /lustre || mount /lustre" in result
 
 
 def test_worker_extras_system_packages_are_installed_with_apt() -> None:
@@ -753,6 +914,7 @@ def test_worker_config_uses_dedicated_conf_directories_only() -> None:
     assert "/etc/hadoop/conf/core-site.xml" in result
     assert "/etc/hadoop/conf/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
+    assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/netdata/stream.conf" in result
     assert "/etc/hadoop/hadoop-env.sh" not in result
     assert "/etc/default/hadoop" not in result

@@ -484,6 +484,7 @@ def test_run_install_playbook_only_requests_python_installs_when_system_empty(
     python_install_task = tasks[
         "Install requested Python packages into the overlay venv"
     ]
+    smoke_test_task = tasks["Run optional smoke test"]
     import_verify_task = tasks["Verify requested Python imports"]
     version_verify_task = tasks["Verify requested Python package versions"]
 
@@ -500,6 +501,7 @@ def test_run_install_playbook_only_requests_python_installs_when_system_empty(
     assert _task_when(system_install_task) == ["system_packages | length > 0"]
     assert _task_when(overlay_create_task) == ["python_packages | length > 0"]
     assert _task_when(python_install_task) == ["python_packages | length > 0"]
+    assert _task_when(smoke_test_task) == ["smoke_test is not none"]
     assert _task_when(import_verify_task) == ["python_packages | length > 0"]
     assert _task_when(version_verify_task) == ["python_packages | length > 0"]
     assert _require_list(
@@ -518,6 +520,13 @@ def test_run_install_playbook_only_requests_python_installs_when_system_empty(
     ) == (
         "{{ [base_venv_path + '/bin/uv', 'pip', 'install', '--python', "
         "overlay_venv_path + '/bin/python'] + python_packages }}"
+    )
+    assert (
+        '. "{{ overlay_venv_path }}/bin/activate" && {{ smoke_test }}'
+        in _require_str(
+            smoke_test_task["ansible.builtin.shell"],
+            context="smoke test shell",
+        )
     )
     assert _require_list(
         _task_module(import_verify_task, "ansible.builtin.command")["argv"],
@@ -704,6 +713,8 @@ def test_install_playbook_verifies_overlay_imports_from_base_and_overlay() -> No
 
     base_import_task = tasks["Verify immutable base packages from the overlay venv"]
     requested_import_task = tasks["Verify requested Python imports"]
+    import_status_task = tasks["Build Python import verification metadata"]
+    base_import_status_task = tasks["Build base package import verification metadata"]
     update_state_task = tasks["Update node-local software state"]
     append_result_task = tasks["Append node result on the controller"]
 
@@ -711,6 +722,15 @@ def test_install_playbook_verifies_overlay_imports_from_base_and_overlay() -> No
         play_vars["hailstack_base_python_packages"],
         context="hailstack_base_python_packages",
     ) == ["hail"]
+    assert _require_dict(
+        play_vars["hailstack_python_import_aliases"],
+        context="hailstack_python_import_aliases",
+    ) == {
+        "pyyaml": "yaml",
+        "python-dateutil": "dateutil",
+        "scikit-image": "skimage",
+        "scikit-learn": "sklearn",
+    }
     assert _require_str(base_import_task["loop"], context="base import loop") == (
         "{{ hailstack_base_python_packages }}"
     )
@@ -745,6 +765,39 @@ def test_install_playbook_verifies_overlay_imports_from_base_and_overlay() -> No
         _task_module(append_result_task, "ansible.builtin.lineinfile")["line"],
         context="append result line",
     )
+    import_check_script = _require_str(
+        play_vars["hailstack_import_check_script"],
+        context="hailstack_import_check_script",
+    )
+    import_status_expr = _require_str(
+        _task_module(import_status_task, "ansible.builtin.set_fact")[
+            "hailstack_import_status"
+        ],
+        context="hailstack_import_status",
+    )
+    base_import_status_expr = _require_str(
+        _task_module(base_import_status_task, "ansible.builtin.set_fact")[
+            "hailstack_base_import_status"
+        ],
+        context="hailstack_base_import_status",
+    )
+    assert (
+        "aliases = {{ hailstack_python_import_aliases | to_json }}"
+        in import_check_script
+    )
+    assert "import re" in import_check_script
+    assert (
+        "from importlib.metadata import PackageNotFoundError, distribution"
+        in import_check_script
+    )
+    assert (
+        'top_level = distribution(requirement.name).read_text("top_level.txt")'
+        in import_check_script
+    )
+    assert (
+        'distribution_name = re.sub(r"[-_.]+", "-", '
+        "requirement.name.lower())" in import_check_script
+    )
     assert (
         "'base_imports': hailstack_base_import_status | default({})"
         in update_state_content
@@ -755,6 +808,70 @@ def test_install_playbook_verifies_overlay_imports_from_base_and_overlay() -> No
     )
     assert "base package import verification failed" in append_result_line
     assert "python import verification failed" in append_result_line
+    assert "verification.update({result.item: (result.rc == 0)})" in import_status_expr
+    assert (
+        "verification.update({result.item: (result.rc == 0)})"
+        in base_import_status_expr
+    )
+
+
+def test_install_playbook_repoints_cluster_entrypoints_to_overlay_python() -> None:
+    """Rewrite Spark and Jupyter to use the overlay runtime after Python installs."""
+    _play, tasks = _load_playbook()
+
+    spark_task = tasks["Ensure Spark uses overlay Python for PySpark"]
+    jupyter_task = tasks["Ensure JupyterLab service uses overlay Python"]
+    disable_legacy_task = tasks["Disable legacy Hailstack JupyterLab service"]
+    restart_task = tasks["Restart JupyterLab after overlay Python update"]
+
+    assert _task_when(spark_task) == ["python_packages | length > 0"]
+    assert _task_module(spark_task, "ansible.builtin.lineinfile") == {
+        "path": "/etc/spark/conf/spark-defaults.conf",
+        "regexp": "^spark\\.pyspark\\.python\\s+",
+        "line": "spark.pyspark.python {{ overlay_venv_path }}/bin/python",
+    }
+    assert _task_when(jupyter_task) == ["python_packages | length > 0"]
+    assert "{{ overlay_venv_path }}/bin/python -m jupyterlab" in _require_str(
+        _task_module(jupyter_task, "ansible.builtin.copy")["content"],
+        context="jupyter overlay unit content",
+    )
+    assert _task_when(restart_task) == [
+        "python_packages | length > 0",
+        "'master' in group_names",
+    ]
+    assert _task_when(disable_legacy_task) == [
+        "python_packages | length > 0",
+        "'master' in group_names",
+    ]
+    assert _task_module(disable_legacy_task, "ansible.builtin.systemd_service") == {
+        "name": "hailstack-jupyterlab",
+        "daemon_reload": True,
+        "enabled": False,
+        "state": "stopped",
+    }
+    assert _task_module(restart_task, "ansible.builtin.systemd_service") == {
+        "name": "jupyter-lab",
+        "daemon_reload": True,
+        "enabled": True,
+        "state": "restarted",
+    }
+
+
+def test_install_playbook_strips_requirement_extras_and_markers_for_presence() -> None:
+    """Normalize PEP 508 extras and markers before matching installed dists."""
+    _play, tasks = _load_playbook()
+
+    python_status_task = tasks["Build Python presence verification metadata"]
+    python_status_expr = _require_str(
+        _task_module(python_status_task, "ansible.builtin.set_fact")[
+            "hailstack_python_status"
+        ],
+        context="hailstack_python_status",
+    )
+
+    assert "regex_replace(';.*$', '')" in python_status_expr
+    assert "regex_replace('\\[.*\\]', '')" in python_status_expr
+    assert "regex_replace('\\s+', '')" in python_status_expr
 
 
 def test_run_install_playbook_raises_on_nonzero_without_results(

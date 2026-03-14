@@ -121,12 +121,10 @@ def test_ci_lint_job_runs_ruff_commands_that_fail_on_lint_or_format_errors() -> 
 
 def test_ci_typecheck_job_uses_repo_strict_pyright_configuration() -> None:
     """Run Pyright using the repo's strict pyproject configuration."""
-    typecheck_step = _step_by_name(
-        "typecheck", "Run Pyright strict type checks")
+    typecheck_step = _step_by_name("typecheck", "Run Pyright strict type checks")
     pyproject = _load_pyproject()
     tool_config = _require_dict(pyproject["tool"], context="tool config")
-    pyright_config = _require_dict(
-        tool_config["pyright"], context="pyright config")
+    pyright_config = _require_dict(tool_config["pyright"], context="pyright config")
 
     assert _require_str(typecheck_step["run"], context="typecheck run command") == (
         "uv run pyright"

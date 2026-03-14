@@ -60,6 +60,50 @@ master_flavour = "m2.2xlarge"
     assert result.ssh_keys.public_keys == []
 
 
+def test_create_validation_requires_at_least_one_ssh_public_key(
+    tmp_path: Path,
+) -> None:
+    """Reject create configs that omit the ssh_keys.public_keys list."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+
+[ceph_s3]
+endpoint = "https://ceph.example.invalid"
+bucket = "hailstack-state"
+access_key = "state-access"
+secret_key = "state-secret"
+""".strip(),
+    )
+
+    config = load_config(config_path)
+
+    with pytest.raises(ConfigError, match="ssh_keys.public_keys required"):
+        config.validate_for_command("create")
+
+
+def test_managed_volume_size_must_be_positive(tmp_path: Path) -> None:
+    """Reject non-positive managed volume sizes during config parsing."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+
+[volumes]
+create = true
+size_gb = 0
+""".strip(),
+    )
+
+    with pytest.raises(ValidationError, match="volumes.size_gb must be at least 1"):
+        load_config(config_path)
+
+
 def test_worker_flavour_defaults_to_master_flavour(tmp_path: Path) -> None:
     """Use the master flavour for workers when omitted."""
     config_path = _write_config(
@@ -202,6 +246,38 @@ monitoring = "prometheus"
         load_config(config_path)
 
 
+def test_ssh_username_cannot_be_empty(tmp_path: Path) -> None:
+    """Reject blank SSH usernames because lifecycle commands require them."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+ssh_username = "   "
+""".strip(),
+    )
+
+    with pytest.raises(ValidationError, match="ssh_username cannot be empty"):
+        load_config(config_path)
+
+
+def test_lustre_mount_target_cannot_be_empty(tmp_path: Path) -> None:
+    """Reject blank Lustre mount targets because mounts need a real endpoint."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+lustre_mount_target = "   "
+""".strip(),
+    )
+
+    with pytest.raises(ValidationError, match="lustre_mount_target cannot be empty"):
+        load_config(config_path)
+
+
 def test_num_workers_must_be_at_least_one(tmp_path: Path) -> None:
     """Reject zero-worker clusters."""
     config_path = _write_config(
@@ -253,6 +329,50 @@ base_image = "ubuntu-22.04"
 
     assert result.packer is not None
     assert result.packer.base_image == "ubuntu-22.04"
+
+
+def test_cluster_floating_ip_pool_parses_without_packer(tmp_path: Path) -> None:
+    """Allow create-time floating IP pool selection without build-image settings."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+floating_ip_pool = "public"
+""".strip(),
+    )
+
+    result = load_config(config_path)
+
+    assert result.cluster.floating_ip_pool == "public"
+    assert result.packer is None
+
+
+def test_runtime_s3_credentials_must_be_complete_when_configured(
+    tmp_path: Path,
+) -> None:
+    """Reject partial S3 runtime settings instead of rendering broken Hadoop config."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+
+[s3]
+endpoint = "https://ceph.example.invalid"
+access_key = "access"
+""".strip(),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "s3.endpoint, s3.access_key, and s3.secret_key must all be set together"
+        ),
+    ):
+        load_config(config_path)
 
 
 def test_extras_system_packages_parse_as_list(tmp_path: Path) -> None:
@@ -307,5 +427,8 @@ secret_key = "secret"
 
     config = load_config(config_path)
 
-    with pytest.raises(ConfigError, match="ceph_s3 credentials required"):
+    with pytest.raises(
+        ConfigError,
+        match="Ceph S3 credentials required for Pulumi state backend",
+    ):
         config.validate_for_command("create")

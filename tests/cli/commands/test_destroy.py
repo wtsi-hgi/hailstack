@@ -24,7 +24,6 @@
 """Acceptance tests for the J1 destroy CLI command."""
 
 from pathlib import Path
-from typing import Protocol, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -33,18 +32,6 @@ from hailstack.cli.commands import destroy as destroy_module
 from hailstack.cli.main import app
 
 runner = CliRunner()
-
-
-class ClusterLike(Protocol):
-    """Define the subset of cluster config used by the test double."""
-
-    floating_ip: str
-
-
-class DestroyConfigLike(Protocol):
-    """Define the subset of config shape used by the test double."""
-
-    cluster: ClusterLike
 
 
 class FakePulumiDestroyRunner:
@@ -60,7 +47,6 @@ class FakePulumiDestroyRunner:
         self.checked_backend = 0
         self.preview_calls = 0
         self.destroy_calls = 0
-        self.released_floating_ips: list[str] = []
 
     def check_backend_access(self, config: object) -> None:
         """Record backend validation before preview or destroy."""
@@ -74,12 +60,9 @@ class FakePulumiDestroyRunner:
         return self.preview_output
 
     def destroy(self, config: object) -> None:
-        """Record destroy calls and the floating IP being released."""
+        """Record destroy calls."""
+        del config
         self.destroy_calls += 1
-        typed_config = cast(DestroyConfigLike, config)
-        floating_ip = typed_config.cluster.floating_ip
-        if isinstance(floating_ip, str) and floating_ip:
-            self.released_floating_ips.append(floating_ip)
 
 
 def _write_config(
@@ -118,10 +101,15 @@ def _install_fake_runner(
     pulumi_runner: FakePulumiDestroyRunner,
 ) -> None:
     """Install a fake Pulumi factory into the destroy module."""
+
+    def fake_create_pulumi_destroy_runner(logger: object) -> FakePulumiDestroyRunner:
+        del logger
+        return pulumi_runner
+
     monkeypatch.setattr(
         destroy_module,
         "create_pulumi_destroy_runner",
-        lambda logger: pulumi_runner,
+        fake_create_pulumi_destroy_runner,
     )
 
 
@@ -185,11 +173,11 @@ def test_destroy_with_incorrect_confirmation_aborts(
     assert fake_runner.destroy_calls == 0
 
 
-def test_destroy_releases_floating_ip_after_success(
+def test_destroy_accepts_configured_floating_ip_after_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Release the configured floating IP when destroy succeeds."""
+    """Destroy the stack successfully when the config includes a floating IP."""
     config_path = _write_config(
         tmp_path / "destroy.toml",
         floating_ip="203.0.113.44",
@@ -204,7 +192,7 @@ def test_destroy_releases_floating_ip_after_success(
     )
 
     assert result.exit_code == 0
-    assert fake_runner.released_floating_ips == ["203.0.113.44"]
+    assert fake_runner.destroy_calls == 1
 
 
 def test_destroy_logs_each_progress_stage_to_stderr(

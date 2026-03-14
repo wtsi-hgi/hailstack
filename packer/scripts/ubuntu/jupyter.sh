@@ -7,7 +7,7 @@ test -d /opt/hailstack/base-venv
   --python /opt/hailstack/base-venv/bin/python \
   jupyterlab
 
-systemctl enable hailstack-jupyterlab.service
-test -f /etc/systemd/system/hailstack-jupyterlab.service
+systemctl enable jupyter-lab.service
+test -f /etc/systemd/system/jupyter-lab.service
 JUPYTER_VERSION="${JUPYTER_VERSION:-$(/opt/hailstack/base-venv/bin/jupyter lab --version)}"
 /opt/hailstack/base-venv/bin/jupyter lab --version | grep -F "$JUPYTER_VERSION"

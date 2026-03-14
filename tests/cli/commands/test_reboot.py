@@ -26,6 +26,7 @@
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 from typer.testing import CliRunner
@@ -60,18 +61,29 @@ class FakeRebootStackRunner:
         }
 
 
+class RebootCall(TypedDict):
+    """Store one reboot executor invocation for assertions."""
+
+    inventory: list[reboot_module.RebootTarget]
+    ssh_username: str
+    ssh_key_path: Path | None
+    timeout_seconds: float
+    backoff_seconds: tuple[float, ...]
+
+
 class FakeRebootExecutor:
     """Capture reboot requests without performing real SSH operations."""
 
     def __init__(self) -> None:
         """Initialise recorded call storage."""
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[RebootCall] = []
 
     def reboot_nodes(
         self,
         inventory: Sequence[reboot_module.RebootTarget],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None,
         timeout_seconds: float,
         backoff_seconds: Sequence[float],
     ) -> None:
@@ -80,10 +92,33 @@ class FakeRebootExecutor:
             {
                 "inventory": list(inventory),
                 "ssh_username": ssh_username,
+                "ssh_key_path": ssh_key_path,
                 "timeout_seconds": timeout_seconds,
                 "backoff_seconds": tuple(backoff_seconds),
             }
         )
+
+
+class _SSHRebootExecutorHarness(reboot_module.SSHRebootExecutor):
+    """Expose protected SSH reboot helpers for focused unit tests."""
+
+    def request_reboot(
+        self,
+        target: reboot_module.RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None = None,
+    ) -> None:
+        """Forward to the protected reboot-dispatch helper."""
+        self._request_reboot(target, ssh_username, ssh_key_path)
+
+    def check_connectivity(
+        self,
+        target: reboot_module.RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None = None,
+    ) -> bool:
+        """Forward to the protected connectivity helper."""
+        return self._check_connectivity(target, ssh_username, ssh_key_path)
 
 
 def _write_config(path: Path) -> Path:
@@ -117,15 +152,24 @@ def _install_fakes(
     """Install fake reboot dependencies into the command module."""
     fake_stack_runner = FakeRebootStackRunner()
     fake_executor = FakeRebootExecutor()
+
+    def fake_create_reboot_stack_runner(logger: object) -> FakeRebootStackRunner:
+        del logger
+        return fake_stack_runner
+
+    def fake_create_reboot_executor(logger: object) -> FakeRebootExecutor:
+        del logger
+        return fake_executor
+
     monkeypatch.setattr(
         reboot_module,
         "create_reboot_stack_runner",
-        lambda logger: fake_stack_runner,
+        fake_create_reboot_stack_runner,
     )
     monkeypatch.setattr(
         reboot_module,
         "create_reboot_executor",
-        lambda logger: fake_executor,
+        fake_create_reboot_executor,
     )
     return fake_stack_runner, fake_executor
 
@@ -147,6 +191,7 @@ def test_reboot_without_node_targets_all_workers(
         "worker-03",
     ]
     assert fake_executor.calls[0]["ssh_username"] == "ubuntu"
+    assert fake_executor.calls[0]["ssh_key_path"] is None
     assert fake_executor.calls[0]["timeout_seconds"] == 300.0
     assert fake_executor.calls[0]["backoff_seconds"] == (1.0, 2.0, 4.0)
 
@@ -170,6 +215,31 @@ def test_reboot_with_node_targets_only_selected_worker(
     ]
     assert fake_executor.calls[0]["inventory"][0].host == "10.0.0.21"
     assert fake_executor.calls[0]["inventory"][0].jump_host == "198.51.100.10"
+
+
+def test_reboot_passes_explicit_ssh_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread --ssh-key through the reboot executor."""
+    config_path = _write_config(tmp_path / "reboot.toml")
+    ssh_key_path = tmp_path / "cluster-key"
+    ssh_key_path.write_text("PRIVATE KEY", encoding="utf-8")
+    _, fake_executor = _install_fakes(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "reboot",
+            "--config",
+            str(config_path),
+            "--ssh-key",
+            str(ssh_key_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert fake_executor.calls[0]["ssh_key_path"] == ssh_key_path
 
 
 def test_reboot_with_unknown_worker_reports_error(
@@ -211,14 +281,20 @@ def test_ssh_reboot_executor_waits_for_connectivity_to_return() -> None:
     sleep_calls: list[float] = []
     elapsed = {"now": 0.0}
     connectivity = iter([True, False, False, True])
+    boot_markers = iter(["boot-1", "boot-1", "boot-2"])
     requested_reboots: list[str] = []
 
     executor = reboot_module.SSHRebootExecutor(
         logger=reboot_module.get_reboot_logger(),
-        reboot_requester=lambda target, ssh_username: requested_reboots.append(
-            f"{ssh_username}@{target.host}"
+        reboot_requester=lambda target, ssh_username, ssh_key_path: (
+            requested_reboots.append(f"{ssh_username}@{target.host}")
         ),
-        connectivity_checker=lambda target, ssh_username: next(connectivity),
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: next(
+            connectivity
+        ),
+        boot_marker_reader=lambda target, ssh_username, ssh_key_path: next(
+            boot_markers
+        ),
         sleeper=lambda seconds: (
             sleep_calls.append(seconds)
             or elapsed.__setitem__(
@@ -240,14 +316,53 @@ def test_ssh_reboot_executor_waits_for_connectivity_to_return() -> None:
     assert sleep_calls == [1.0, 2.0, 4.0]
 
 
+def test_ssh_reboot_executor_accepts_boot_id_change_without_observed_disconnect() -> (
+    None
+):
+    """Accept recovery when SSH stays up but the boot ID changes."""
+    sleep_calls: list[float] = []
+    elapsed = {"now": 0.0}
+    connectivity = iter([True, True])
+    boot_markers = iter(["boot-1", "boot-1", "boot-2"])
+
+    executor = reboot_module.SSHRebootExecutor(
+        logger=reboot_module.get_reboot_logger(),
+        reboot_requester=lambda target, ssh_username, ssh_key_path: None,
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: next(
+            connectivity
+        ),
+        boot_marker_reader=lambda target, ssh_username, ssh_key_path: next(
+            boot_markers
+        ),
+        sleeper=lambda seconds: (
+            sleep_calls.append(seconds)
+            or elapsed.__setitem__(
+                "now",
+                elapsed["now"] + seconds,
+            )
+        ),
+        clock=lambda: elapsed["now"],
+    )
+
+    executor.reboot_nodes(
+        [reboot_module.RebootTarget(name="worker-01", host="10.0.0.21")],
+        ssh_username="ubuntu",
+        timeout_seconds=300.0,
+        backoff_seconds=(1.0, 2.0, 4.0),
+    )
+
+    assert sleep_calls == [1.0]
+
+
 def test_ssh_reboot_executor_times_out_when_connectivity_never_returns() -> None:
     """Raise SSHError when a rebooted worker never becomes reachable again."""
     elapsed = {"now": 0.0}
 
     executor = reboot_module.SSHRebootExecutor(
         logger=reboot_module.get_reboot_logger(),
-        reboot_requester=lambda target, ssh_username: None,
-        connectivity_checker=lambda target, ssh_username: False,
+        reboot_requester=lambda target, ssh_username, ssh_key_path: None,
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: False,
+        boot_marker_reader=lambda target, ssh_username, ssh_key_path: "boot-1",
         sleeper=lambda seconds: elapsed.__setitem__(
             "now", elapsed["now"] + seconds),
         clock=lambda: elapsed["now"],
@@ -260,6 +375,125 @@ def test_ssh_reboot_executor_times_out_when_connectivity_never_returns() -> None
             "within 300 seconds"
         ),
     ):
+        executor.reboot_nodes(
+            [reboot_module.RebootTarget(name="worker-01", host="10.0.0.21")],
+            ssh_username="ubuntu",
+            timeout_seconds=300.0,
+            backoff_seconds=(1.0, 2.0, 4.0),
+        )
+
+
+def test_ssh_reboot_executor_times_out_when_boot_id_never_changes() -> None:
+    """Raise SSHError when the node stays reachable but never actually reboots."""
+    elapsed = {"now": 0.0}
+
+    executor = reboot_module.SSHRebootExecutor(
+        logger=reboot_module.get_reboot_logger(),
+        reboot_requester=lambda target, ssh_username, ssh_key_path: None,
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: True,
+        boot_marker_reader=lambda target, ssh_username, ssh_key_path: "boot-1",
+        sleeper=lambda seconds: elapsed.__setitem__(
+            "now", elapsed["now"] + seconds),
+        clock=lambda: elapsed["now"],
+    )
+
+    with pytest.raises(
+        SSHError,
+        match=(
+            "Timed out waiting for SSH connectivity to return for worker-01 "
+            "within 300 seconds"
+        ),
+    ):
+        executor.reboot_nodes(
+            [reboot_module.RebootTarget(name="worker-01", host="10.0.0.21")],
+            ssh_username="ubuntu",
+            timeout_seconds=300.0,
+            backoff_seconds=(1.0, 2.0, 4.0),
+        )
+
+
+def test_ssh_reboot_executor_retries_when_boot_marker_probe_drops() -> None:
+    """Keep waiting when the follow-up boot marker probe loses SSH transport."""
+    sleep_calls: list[float] = []
+    elapsed = {"now": 0.0}
+    connectivity = iter([True, True])
+    boot_marker_results: list[str | Exception] = [
+        "boot-1",
+        SSHError("Connection to 10.0.0.21 closed by remote host"),
+        "boot-2",
+    ]
+
+    def boot_marker_reader(
+        target: reboot_module.RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None,
+    ) -> str:
+        del target, ssh_username, ssh_key_path
+        result = boot_marker_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    executor = reboot_module.SSHRebootExecutor(
+        logger=reboot_module.get_reboot_logger(),
+        reboot_requester=lambda target, ssh_username, ssh_key_path: None,
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: next(
+            connectivity
+        ),
+        boot_marker_reader=boot_marker_reader,
+        sleeper=lambda seconds: (
+            sleep_calls.append(seconds)
+            or elapsed.__setitem__(
+                "now",
+                elapsed["now"] + seconds,
+            )
+        ),
+        clock=lambda: elapsed["now"],
+    )
+
+    executor.reboot_nodes(
+        [reboot_module.RebootTarget(name="worker-01", host="10.0.0.21")],
+        ssh_username="ubuntu",
+        timeout_seconds=300.0,
+        backoff_seconds=(1.0, 2.0, 4.0),
+    )
+
+    assert sleep_calls == [1.0]
+
+
+def test_ssh_reboot_executor_surfaces_non_transport_boot_marker_failures() -> None:
+    """Raise non-transport boot-marker errors immediately instead of retrying them."""
+    elapsed = {"now": 0.0}
+    connectivity = iter([True])
+    boot_marker_results: list[str | Exception] = [
+        "boot-1",
+        reboot_module.SSHError("Permission denied reading boot marker"),
+    ]
+
+    def boot_marker_reader(
+        target: reboot_module.RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None,
+    ) -> str:
+        del target, ssh_username, ssh_key_path
+        result = boot_marker_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    executor = reboot_module.SSHRebootExecutor(
+        logger=reboot_module.get_reboot_logger(),
+        reboot_requester=lambda target, ssh_username, ssh_key_path: None,
+        connectivity_checker=lambda target, ssh_username, ssh_key_path: next(
+            connectivity
+        ),
+        boot_marker_reader=boot_marker_reader,
+        sleeper=lambda seconds: elapsed.__setitem__(
+            "now", elapsed["now"] + seconds),
+        clock=lambda: elapsed["now"],
+    )
+
+    with pytest.raises(reboot_module.SSHError, match="Permission denied"):
         executor.reboot_nodes(
             [reboot_module.RebootTarget(name="worker-01", host="10.0.0.21")],
             ssh_username="ubuntu",
@@ -289,10 +523,10 @@ def test_ssh_reboot_executor_tolerates_transport_drop_when_reboot_starts(
 
     monkeypatch.setattr(reboot_module.subprocess, "run", fake_run)
 
-    executor = reboot_module.SSHRebootExecutor(
+    executor = _SSHRebootExecutorHarness(
         logger=reboot_module.get_reboot_logger())
 
-    executor._request_reboot(
+    executor.request_reboot(
         reboot_module.RebootTarget(
             name="worker-01",
             host="10.0.0.21",
@@ -301,7 +535,7 @@ def test_ssh_reboot_executor_tolerates_transport_drop_when_reboot_starts(
         "ubuntu",
     )
 
-    assert commands[0][:11] == [
+    assert commands[0][:14] == [
         "ssh",
         "-o",
         "BatchMode=yes",
@@ -309,8 +543,71 @@ def test_ssh_reboot_executor_tolerates_transport_drop_when_reboot_starts(
         "ConnectTimeout=5",
         "-o",
         "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
         "-J",
         "ubuntu@198.51.100.10",
         "ubuntu@10.0.0.21",
-        "sudo",
     ]
+    assert commands[0][14] == "sudo"
+
+
+def test_ssh_reboot_executor_raises_when_reboot_cannot_be_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail immediately when SSH cannot reach the target for reboot dispatch."""
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        return subprocess.CompletedProcess(
+            [],
+            255,
+            stdout="",
+            stderr="No route to host",
+        )
+
+    monkeypatch.setattr(reboot_module.subprocess, "run", fake_run)
+
+    executor = _SSHRebootExecutorHarness(
+        logger=reboot_module.get_reboot_logger())
+
+    with pytest.raises(SSHError, match="Failed to dispatch reboot to worker-01"):
+        executor.request_reboot(
+            reboot_module.RebootTarget(name="worker-01", host="10.0.0.21"),
+            "ubuntu",
+        )
+
+
+def test_ssh_reboot_executor_raises_on_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail fast when SSH authentication fails during connectivity checks."""
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        return subprocess.CompletedProcess(
+            [],
+            255,
+            stdout="",
+            stderr="Permission denied (publickey)",
+        )
+
+    monkeypatch.setattr(reboot_module.subprocess, "run", fake_run)
+
+    executor = _SSHRebootExecutorHarness(
+        logger=reboot_module.get_reboot_logger(),
+    )
+
+    with pytest.raises(SSHError, match="Permission denied"):
+        executor.check_connectivity(
+            reboot_module.RebootTarget(name="worker-01", host="10.0.0.21"),
+            "ubuntu",
+        )

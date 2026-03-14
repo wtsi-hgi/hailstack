@@ -42,17 +42,17 @@ from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.config.validator import validate_bundle
 from hailstack.errors import (
-    ConfigError,
     ImageNotFoundError,
     NetworkError,
     PulumiError,
     QuotaExceededError,
     ResourceNotFoundError,
+    S3Error,
 )
 from hailstack.pulumi.stack import AutomationStackRunner
+from hailstack.runtime_paths import BUNDLES_TOML_PATH
 
-DEFAULT_COMPATIBILITY_MATRIX_PATH = Path(
-    __file__).resolve().parents[4] / "bundles.toml"
+DEFAULT_COMPATIBILITY_MATRIX_PATH = BUNDLES_TOML_PATH
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,23 @@ class OpenStackPreflightClient(Protocol):
         """Report whether a referenced Cinder volume exists."""
         ...
 
+    def volume_is_available(self, volume_id: str) -> bool:
+        """Report whether a referenced Cinder volume can be attached now."""
+        ...
+
+    def volume_is_attached_to_server(self, volume_id: str, server_name: str) -> bool:
+        """Report whether a referenced Cinder volume is attached to one server."""
+        ...
+
+    def attached_volume_size_gb(
+        self,
+        server_name: str,
+        *,
+        volume_name: str,
+    ) -> int | None:
+        """Return the size of a named volume attached to the given server."""
+        ...
+
     def get_compute_quota(self) -> ComputeQuota:
         """Return currently available compute quota."""
         ...
@@ -118,7 +135,25 @@ class PulumiCreateRunner(Protocol):
         """Validate backend access before preview or apply."""
         ...
 
-    def preview(self, config: ClusterConfig, bundle: Bundle) -> str:
+    def stack_exists(self, config: ClusterConfig) -> bool:
+        """Return whether the target stack already exists in the backend."""
+        ...
+
+    def current_master_public_ip(self, config: ClusterConfig) -> str | None:
+        """Return the current stack master public IP when the stack exists."""
+        ...
+
+    def current_stack_outputs(self, config: ClusterConfig) -> Mapping[str, object]:
+        """Return the current resolved stack outputs when the stack exists."""
+        ...
+
+    def preview(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        stack_exists: bool | None = None,
+    ) -> str:
         """Return rendered preview output."""
         ...
 
@@ -126,8 +161,8 @@ class PulumiCreateRunner(Protocol):
         """Apply infrastructure and return an object exposing master_public_ip."""
         ...
 
-    def destroy(self, config: ClusterConfig, bundle: Bundle) -> None:
-        """Destroy infrastructure after a failed create attempt."""
+    def cleanup_failed_create(self, config: ClusterConfig, bundle: Bundle) -> None:
+        """Destroy infrastructure created by a failed first-time create."""
         ...
 
 
@@ -178,6 +213,66 @@ class OpenStackCLIClient:
             )
             is not None
         )
+
+    def volume_is_available(self, volume_id: str) -> bool:
+        """Report whether the named Cinder volume is unattached and available."""
+        payload = self._run_optional_show(
+            ["openstack", "volume", "show", volume_id, "-f", "json"]
+        )
+        if payload is None:
+            return False
+
+        status = payload.get("status")
+        attachments = payload.get("attachments")
+        return (
+            isinstance(status, str)
+            and status.strip().lower() == "available"
+            and not _volume_has_attachments(attachments)
+        )
+
+    def volume_is_attached_to_server(self, volume_id: str, server_name: str) -> bool:
+        """Report whether the named Cinder volume is attached to one server."""
+        payload = self._run_optional_show(
+            ["openstack", "volume", "show", volume_id, "-f", "json"]
+        )
+        if payload is None:
+            return False
+
+        server_id = self._server_id(server_name)
+        if server_id is None:
+            return False
+
+        return _attachments_include_server_id(payload.get("attachments"), server_id)
+
+    def attached_volume_size_gb(
+        self,
+        server_name: str,
+        *,
+        volume_name: str,
+    ) -> int | None:
+        """Return the size of one named volume currently attached to a server."""
+        server_payload = self._run_optional_show(
+            ["openstack", "server", "show", server_name, "-f", "json"]
+        )
+        if server_payload is None:
+            return None
+
+        for volume_id in _attached_volume_ids(
+            server_payload.get("volumes_attached")
+            or server_payload.get("volumes attached")
+        ):
+            volume_payload = self._run_optional_show(
+                ["openstack", "volume", "show", volume_id, "-f", "json"]
+            )
+            if volume_payload is None:
+                continue
+            current_name = volume_payload.get(
+                "name") or volume_payload.get("Name")
+            if not isinstance(current_name, str) or current_name.strip() != volume_name:
+                continue
+            return _require_int(volume_payload, "size")
+
+        return None
 
     def get_compute_quota(self) -> ComputeQuota:
         """Return the currently available project compute quota."""
@@ -253,6 +348,19 @@ class OpenStackCLIClient:
 
         return _parse_json_mapping(result.stdout, "OpenStack CLI")
 
+    def _server_id(self, server_name: str) -> str | None:
+        """Return the UUID for a server name when it exists."""
+        payload = self._run_optional_show(
+            ["openstack", "server", "show", server_name, "-f", "json"]
+        )
+        if payload is None:
+            return None
+
+        server_id = payload.get("id") or payload.get("ID")
+        if not isinstance(server_id, str) or not server_id.strip():
+            return None
+        return server_id.strip()
+
 
 def _openstack_show_failed_not_found(detail: str) -> bool:
     """Return true when an OpenStack show failure represents a missing resource."""
@@ -306,22 +414,20 @@ def _resolve_bundle(matrix: CompatibilityMatrix, config: ClusterConfig) -> Bundl
     return validate_bundle(config, matrix)
 
 
-def _ensure_ceph_s3_credentials(config: ClusterConfig) -> None:
-    """Require Ceph S3 credentials before touching Pulumi state."""
-    if not config.ceph_s3.has_required_credentials():
-        raise ConfigError(
-            "Ceph S3 credentials required for Pulumi state backend")
-
-
 def _run_preflight_validation(
     config: ClusterConfig,
     bundle: Bundle,
     client: OpenStackPreflightClient,
-) -> None:
+    *,
+    expected_attached_floating_ip: str | None = None,
+    current_stack_outputs: Mapping[str, object] | None = None,
+    skip_backend_dependent_checks: bool = False,
+) -> list[str]:
     """Validate required resources and quotas before running Pulumi."""
     image_name = f"hailstack-{bundle.id}"
     missing_resources: list[str] = []
     quota_breaches: list[str] = []
+    warnings: list[str] = []
 
     if client.get_image(image_name) is None:
         missing_resources.append(f"image '{image_name}'")
@@ -330,23 +436,50 @@ def _run_preflight_validation(
 
     if client.get_network(config.cluster.network_name) is None:
         missing_resources.append(f"network '{config.cluster.network_name}'")
+    lustre_network = config.cluster.lustre_network.strip()
+    if lustre_network and client.get_network(lustre_network) is None:
+        missing_resources.append(f"network '{lustre_network}'")
 
     floating_ip = config.cluster.floating_ip.strip()
-    if floating_ip and not client.floating_ip_is_available(floating_ip):
-        missing_resources.append(f"floating IP '{floating_ip}'")
+    master_server_name = f"{config.cluster.name}-master"
+    if (
+        floating_ip
+        and floating_ip != (expected_attached_floating_ip or "")
+        and not client.floating_ip_is_available(floating_ip)
+    ):
+        message = f"floating IP '{floating_ip}' is not currently available"
+        if skip_backend_dependent_checks:
+            warnings.append(message)
+        else:
+            missing_resources.append(f"floating IP '{floating_ip}'")
 
     existing_volume_id = config.volumes.existing_volume_id.strip()
-    if existing_volume_id and not client.volume_exists(existing_volume_id):
-        missing_resources.append(f"volume '{existing_volume_id}'")
+    current_attached_volume_id = None
+    if current_stack_outputs is not None:
+        if "attached_volume_id" in current_stack_outputs:
+            current_attached_volume_id = _optional_output_str(
+                current_stack_outputs,
+                "attached_volume_id",
+            )
+        elif existing_volume_id and client.volume_is_attached_to_server(
+            existing_volume_id,
+            master_server_name,
+        ):
+            current_attached_volume_id = existing_volume_id
+    if existing_volume_id:
+        if not client.volume_exists(existing_volume_id):
+            missing_resources.append(f"volume '{existing_volume_id}'")
+        elif existing_volume_id != (
+            current_attached_volume_id or ""
+        ) and not client.volume_is_available(existing_volume_id):
+            message = f"volume '{existing_volume_id}' is not available for attachment"
+            if skip_backend_dependent_checks:
+                warnings.append(message)
+            else:
+                missing_resources.append(message)
 
     compute_quota = client.get_compute_quota()
     required_instances = config.cluster.num_workers + 1
-    if required_instances > compute_quota.instances_available:
-        quota_breaches.append(
-            "instances: need "
-            f"{required_instances}, available {compute_quota.instances_available}"
-        )
-
     required_cores = 0
     required_ram_mb = 0
     if (master_flavour := flavour_specs.get(config.cluster.master_flavour)) is not None:
@@ -356,27 +489,70 @@ def _run_preflight_validation(
         required_cores += worker_flavour.vcpus * config.cluster.num_workers
         required_ram_mb += worker_flavour.ram_mb * config.cluster.num_workers
 
+    if required_instances > compute_quota.instances_available:
+        quota_message = (
+            "instances: need "
+            f"{required_instances}, available {compute_quota.instances_available}"
+        )
+        if skip_backend_dependent_checks:
+            warnings.append(quota_message)
+        else:
+            quota_breaches.append(quota_message)
+
     if required_cores > compute_quota.cores_available:
-        quota_breaches.append(
+        quota_message = (
             f"cores: need {required_cores}, available {compute_quota.cores_available}"
         )
+        if skip_backend_dependent_checks:
+            warnings.append(quota_message)
+        else:
+            quota_breaches.append(quota_message)
     if required_ram_mb > compute_quota.ram_mb_available:
-        quota_breaches.append(
+        quota_message = (
             "ram_mb: need "
             f"{required_ram_mb}, available {compute_quota.ram_mb_available}"
         )
+        if skip_backend_dependent_checks:
+            warnings.append(quota_message)
+        else:
+            quota_breaches.append(quota_message)
 
     if config.volumes.create:
         volume_quota = client.get_volume_quota()
         required_gigabytes = config.volumes.size_gb
-        if required_gigabytes > volume_quota.gigabytes_available:
-            quota_breaches.append(
-                "gigabytes: need "
-                f"{required_gigabytes}, available {volume_quota.gigabytes_available}"
+        managed_volume_name = (
+            config.volumes.name.strip() or f"{config.cluster.name}-vol"
+        )
+        if current_stack_outputs is not None:
+            current_managed_volume_size_gb = (
+                _optional_output_int(
+                    current_stack_outputs,
+                    "managed_volume_size_gb",
+                )
+                if "managed_volume_size_gb" in current_stack_outputs
+                else client.attached_volume_size_gb(
+                    master_server_name,
+                    volume_name=managed_volume_name,
+                )
             )
+            if current_managed_volume_size_gb is not None:
+                required_gigabytes = max(
+                    required_gigabytes - current_managed_volume_size_gb,
+                    0,
+                )
+        if required_gigabytes > volume_quota.gigabytes_available:
+            quota_message = (
+                "gigabytes: need "
+                f"{required_gigabytes}, available "
+                f"{volume_quota.gigabytes_available}"
+            )
+            if skip_backend_dependent_checks:
+                warnings.append(quota_message)
+            else:
+                quota_breaches.append(quota_message)
 
     if not missing_resources and not quota_breaches:
-        return
+        return warnings
 
     if missing_resources == [f"image '{image_name}'"] and not quota_breaches:
         raise ImageNotFoundError(
@@ -411,6 +587,22 @@ def _resolved_flavour_specs(
     return flavour_specs
 
 
+def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
+    """Return a string stack output when present and non-empty."""
+    value = outputs.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _optional_output_int(outputs: Mapping[str, object], key: str) -> int | None:
+    """Return an integer stack output when present."""
+    value = outputs.get(key)
+    if isinstance(value, int):
+        return value
+    return None
+
+
 def _parse_json_mapping(raw_json: str, source: str) -> dict[str, object]:
     """Parse a JSON object response into a typed mapping."""
     try:
@@ -433,6 +625,52 @@ def _require_int(payload: Mapping[str, object], key: str) -> int:
     if isinstance(value, str):
         return int(value)
     raise NetworkError(f"OpenStack CLI response missing integer field '{key}'")
+
+
+def _volume_has_attachments(value: object) -> bool:
+    """Return whether a Cinder volume-show attachments field is populated."""
+    if value is None:
+        return False
+    if isinstance(value, list):
+        return bool(cast(list[object], value))
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _attachments_include_server_id(value: object, server_id: str) -> bool:
+    """Return whether a volume attachments field contains one server UUID."""
+    if not isinstance(value, list):
+        return False
+
+    for item in cast(list[object], value):
+        if not isinstance(item, dict):
+            continue
+        attachment = cast(dict[object, object], item)
+        attachment_server_id = attachment.get(
+            "server_id") or attachment.get("serverId")
+        if (
+            isinstance(attachment_server_id, str)
+            and attachment_server_id.strip() == server_id
+        ):
+            return True
+    return False
+
+
+def _attached_volume_ids(value: object) -> list[str]:
+    """Extract attached volume IDs from an OpenStack server payload field."""
+    if not isinstance(value, list):
+        return []
+
+    volume_ids: list[str] = []
+    for item in cast(list[object], value):
+        if not isinstance(item, dict):
+            continue
+        attachment = cast(dict[object, object], item)
+        volume_id = attachment.get("id") or attachment.get("ID")
+        if isinstance(volume_id, str) and volume_id.strip():
+            volume_ids.append(volume_id.strip())
+    return volume_ids
 
 
 def _available_limit(
@@ -477,29 +715,94 @@ def create_command(
 
     matrix = CompatibilityMatrix(DEFAULT_COMPATIBILITY_MATRIX_PATH)
     resolved_bundle = _resolve_bundle(matrix, loaded_config)
+    loaded_config = loaded_config.validate_for_command(
+        "create",
+        require_backend=not dry_run,
+    )
     logger.info("bundle resolved")
 
-    _ensure_ceph_s3_credentials(loaded_config)
-    _run_preflight_validation(
+    pulumi_runner = create_pulumi_stack_runner(logger)
+    stack_already_exists = False
+    current_outputs = None
+    backend_available = False
+    degraded_dry_run = False
+    if dry_run:
+        if loaded_config.ceph_s3.has_required_credentials():
+            try:
+                pulumi_runner.check_backend_access(loaded_config)
+            except (PulumiError, S3Error) as error:
+                degraded_dry_run = True
+                logger.warning(
+                    "backend unavailable for dry-run preview; "
+                    "falling back to local preview: %s",
+                    error,
+                )
+            else:
+                backend_available = True
+        else:
+            degraded_dry_run = True
+            logger.warning(
+                "backend credentials missing for dry-run preview; "
+                "falling back to local preview without update-aware checks"
+            )
+    else:
+        pulumi_runner.check_backend_access(loaded_config)
+        backend_available = True
+
+    if backend_available:
+        stack_already_exists = pulumi_runner.stack_exists(loaded_config)
+        current_outputs = (
+            pulumi_runner.current_stack_outputs(loaded_config)
+            if stack_already_exists
+            else None
+        )
+
+    preflight_warnings = _run_preflight_validation(
         loaded_config,
         resolved_bundle,
         create_openstack_preflight_client(),
+        expected_attached_floating_ip=(
+            _optional_output_str(current_outputs, "master_public_ip")
+            if current_outputs is not None
+            else None
+        ),
+        current_stack_outputs=current_outputs,
+        skip_backend_dependent_checks=degraded_dry_run,
     )
     logger.info("pre-flight passed")
 
-    pulumi_runner = create_pulumi_stack_runner(logger)
-    pulumi_runner.check_backend_access(loaded_config)
-
     if dry_run:
-        preview_output = pulumi_runner.preview(loaded_config, resolved_bundle)
+        if degraded_dry_run:
+            typer.echo(
+                "Warning: backend unavailable; preview assumes a first create "
+                "and skips update-aware checks.",
+                err=True,
+            )
+            for warning in preflight_warnings:
+                typer.echo(
+                    f"Warning: possible backend-independent blocker: {warning}",
+                    err=True,
+                )
+        preview_output = pulumi_runner.preview(
+            loaded_config,
+            resolved_bundle,
+            stack_exists=stack_already_exists if backend_available else False,
+        )
         typer.echo(preview_output, nl=not preview_output.endswith("\n"))
         return
 
     logger.info("creating infrastructure")
     try:
         result = pulumi_runner.up(loaded_config, resolved_bundle)
-    except PulumiError:
-        pulumi_runner.destroy(loaded_config, resolved_bundle)
+    except PulumiError as error:
+        if not stack_already_exists:
+            try:
+                pulumi_runner.cleanup_failed_create(
+                    loaded_config, resolved_bundle)
+            except PulumiError as cleanup_error:
+                raise PulumiError(
+                    f"{error}; cleanup after failed create also failed: {cleanup_error}"
+                ) from error
         raise
 
     master_public_ip = getattr(result, "master_public_ip", None)

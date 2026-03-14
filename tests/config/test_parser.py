@@ -174,6 +174,36 @@ secret_key = "static-secret"
     assert result.ceph_s3.access_key == "val123"
 
 
+def test_load_config_rejects_missing_s3_credential_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail validation when runtime S3 env vars expand to incomplete credentials."""
+    monkeypatch.delenv("S3_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("S3_SECRET_KEY", raising=False)
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.medium"
+
+[s3]
+endpoint = "https://ceph.example.invalid"
+access_key = "$S3_ACCESS_KEY"
+secret_key = "$S3_SECRET_KEY"
+""".strip(),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "s3.endpoint, s3.access_key, and s3.secret_key must all be set together"
+        ),
+    ):
+        load_config(config_path)
+
+
 def test_load_config_rejects_unknown_top_level_sections(tmp_path: Path) -> None:
     """Reject undeclared top-level config sections instead of preserving them."""
     config_path = _write_config(

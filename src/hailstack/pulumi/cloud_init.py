@@ -39,20 +39,31 @@ HTPASSWD_PATH = "/etc/nginx/.hailstack-htpasswd"
 SSL_CERT_PATH = "/etc/nginx/ssl/hailstack.crt"
 SSL_KEY_PATH = "/etc/nginx/ssl/hailstack.key"
 VOLUME_KEY_PATH = "/etc/hailstack/volume.key"
+VOLUME_DEVICE_PATH = "/etc/hailstack/volume-device"
+VOLUME_UUID_PATH = "/etc/hailstack/volume-uuid"
 BASE_VENV_PATH = "/opt/hailstack/base-venv"
 OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
+RUNTIME_PYTHON_PATH = f"{OVERLAY_VENV_PATH}/bin/python"
 NETDATA_DIR = "/etc/netdata"
 NETDATA_STREAM_PATH = f"{NETDATA_DIR}/stream.conf"
 NETDATA_GO_D_PATH = f"{NETDATA_DIR}/go.d"
 NETDATA_HEALTH_D_PATH = f"{NETDATA_DIR}/health.d"
 
 
-def _require_env_var(name: str, message: str) -> str:
-    """Return a required environment variable or raise ConfigError."""
+def _env_var_or_placeholder(
+    name: str,
+    message: str,
+    *,
+    allow_missing: bool,
+    placeholder: str,
+) -> str:
+    """Return an env var or an inert placeholder for destroy-time rehydration."""
     value = os.environ.get(name, "").strip()
-    if not value:
-        raise ConfigError(message)
-    return value
+    if value:
+        return value
+    if allow_missing:
+        return placeholder
+    raise ConfigError(message)
 
 
 def _volume_enabled(config: ClusterConfig) -> bool:
@@ -179,7 +190,7 @@ def _spark_defaults_content(config: ClusterConfig, bundle: Bundle) -> str:
             [
                 "spark.master spark://master:7077",
                 f"spark.history.fs.logDirectory file:///home/{config.cluster.ssh_username}/data/spark-history",
-                "spark.pyspark.python /opt/hailstack/base-venv/bin/python",
+                f"spark.pyspark.python {RUNTIME_PYTHON_PATH}",
                 f"spark.hadoop.hailstack.bundle {bundle.id}",
             ]
         )
@@ -326,29 +337,39 @@ def _nginx_config_content(config: ClusterConfig) -> str:
 
 
 def _service_commands(config: ClusterConfig) -> list[str]:
-    """Render systemd enable commands for master services."""
+    """Render systemd activation commands for master services."""
     services = [
         "hdfs-namenode",
         "yarn-rm",
         "mapred-history",
         "spark-master",
         "spark-history-server",
-        "hailstack-jupyterlab",
+        "jupyter-lab",
         "nginx",
     ]
     if _volume_enabled(config):
         services.append("nfs-server")
     if _netdata_enabled(config):
         services.append("netdata")
-    return [f"systemctl enable {service}" for service in services]
+    commands: list[str] = []
+    for service in services:
+        commands.append(f"systemctl enable {service}")
+        commands.append(
+            f"systemctl restart {service} || systemctl start {service}")
+    return commands
 
 
 def _worker_service_commands(config: ClusterConfig) -> list[str]:
-    """Render systemd enable commands for worker services."""
+    """Render systemd activation commands for worker services."""
     services = ["hdfs-datanode", "yarn-nm", "spark-worker"]
     if _netdata_enabled(config):
         services.append("netdata")
-    return [f"systemctl enable {service}" for service in services]
+    commands: list[str] = []
+    for service in services:
+        commands.append(f"systemctl enable {service}")
+        commands.append(
+            f"systemctl restart {service} || systemctl start {service}")
+    return commands
 
 
 def _spark_worker_override_content() -> str:
@@ -377,15 +398,18 @@ def _extras_commands(config: ClusterConfig) -> list[str]:
     """Render optional package installation commands."""
     commands: list[str] = []
     if config.extras.system_packages:
+        system_packages = " ".join(
+            quote(package) for package in config.extras.system_packages
+        )
         commands.extend(
             [
                 "apt-get update",
-                "apt-get install -y " +
-                " ".join(config.extras.system_packages),
+                "apt-get install -y " + system_packages,
             ]
         )
     if config.extras.python_packages:
-        packages = " ".join(config.extras.python_packages)
+        packages = " ".join(quote(package)
+                            for package in config.extras.python_packages)
         commands.extend(
             [
                 f"{BASE_VENV_PATH}/bin/python -m venv --system-site-packages "
@@ -406,33 +430,61 @@ def _dns_commands(config: ClusterConfig) -> list[str]:
     """Render optional DNS search-domain commands."""
     if not config.dns.search_domains.strip():
         return []
+    search_domains = config.dns.search_domains.strip()
     return [
-        "grep -q '^search "
-        + config.dns.search_domains
-        + "$' /etc/resolv.conf || printf 'search "
-        + config.dns.search_domains
-        + "\n' >> /etc/resolv.conf"
+        "install -d -m 0755 /etc/systemd/resolved.conf.d",
+        *_here_doc(
+            "/etc/systemd/resolved.conf.d/99-hailstack-search-domains.conf",
+            "EOF_SEARCH_DOMAINS",
+            f"[Resolve]\nDomains={search_domains}\n",
+        ),
+        "systemctl restart systemd-resolved || true",
     ]
 
 
-def _volume_commands(config: ClusterConfig, volume_password: str | None) -> list[str]:
+def _volume_commands(
+    config: ClusterConfig,
+    volume_password: str | None,
+    attached_volume_id: str | None,
+) -> list[str]:
     """Render shared-volume setup commands when a volume is attached."""
     if not _volume_enabled(config):
         return []
     assert volume_password is not None
+    assert attached_volume_id is not None
     data_path = f"/home/{config.cluster.ssh_username}/data"
+    normalized_attached_volume_id = attached_volume_id.strip().lower().replace("-", "")
     commands = [
         "install -d -m 0755 /etc/hailstack",
         *_here_doc(VOLUME_KEY_PATH, "EOF_VOLUME_KEY", volume_password + "\n"),
         f"chmod 600 {VOLUME_KEY_PATH}",
+        f'ATTACHED_VOLUME_ID="{attached_volume_id}"',
+        f'ATTACHED_VOLUME_ID_NORMALIZED="{normalized_attached_volume_id}"',
+        "VOLUME_DEVICE=$(lsblk -ndo PATH,SERIAL,TYPE | "
+        'awk -v volume_id="$ATTACHED_VOLUME_ID" '
+        '-v normalized_volume_id="$ATTACHED_VOLUME_ID_NORMALIZED" '
+        '\'$3 == "disk" { serial=tolower($2); gsub(/-/, "", serial); '
+        "if ($2 == volume_id || serial == normalized_volume_id) "
+        "{ print $1; exit } }'); "
+        '[ -n "$VOLUME_DEVICE" ] || { '
+        'echo "Unable to detect attached data volume for volume ID '
+        '$ATTACHED_VOLUME_ID" >&2; exit 1; }; '
+        f'printf "%s\\n" "$VOLUME_DEVICE" > {VOLUME_DEVICE_PATH}',
     ]
     if _new_volume_requested(config):
         commands.append(
-            "cryptsetup isLuks /dev/vdb "
-            + f"|| cryptsetup luksFormat /dev/vdb {VOLUME_KEY_PATH} --batch-mode"
+            f"VOLUME_DEVICE=$(cat {VOLUME_DEVICE_PATH}) && "
+            "("
+            'cryptsetup isLuks "$VOLUME_DEVICE" || '
+            f'cryptsetup luksFormat "$VOLUME_DEVICE" {VOLUME_KEY_PATH} '
+            "--batch-mode)"
         )
     commands.append(
-        f"cryptsetup open /dev/vdb hailstack-data --key-file {VOLUME_KEY_PATH}"
+        f'cryptsetup luksUUID "$(cat {VOLUME_DEVICE_PATH})" > {VOLUME_UUID_PATH}'
+    )
+    commands.append(
+        "cryptsetup open "
+        f'"$(cat {VOLUME_DEVICE_PATH})" hailstack-data --key-file {VOLUME_KEY_PATH}'
     )
     if _new_volume_requested(config):
         commands.append(
@@ -442,6 +494,11 @@ def _volume_commands(config: ClusterConfig, volume_password: str | None) -> list
     commands.extend(
         [
             f"install -d -m 0755 {data_path}",
+            "grep -q '^hailstack-data ' /etc/crypttab "
+            + '|| echo "hailstack-data UUID=$(cat '
+            + VOLUME_UUID_PATH
+            + ") "
+            + f'{VOLUME_KEY_PATH} luks" >> /etc/crypttab',
             "mountpoint -q "
             + data_path
             + " || mount /dev/mapper/hailstack-data "
@@ -465,7 +522,12 @@ def _lustre_commands(config: ClusterConfig) -> list[str]:
         return []
     return [
         "install -d -m 0755 /lustre",
-        "echo '10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab",
+        "grep -q '^"
+        + config.cluster.lustre_mount_target
+        + " /lustre lustre ' /etc/fstab || echo '"
+        + config.cluster.lustre_mount_target
+        + " /lustre lustre defaults,_netdev 0 0' >> /etc/fstab",
+        "mountpoint -q /lustre || mount /lustre",
     ]
 
 
@@ -488,6 +550,26 @@ def _worker_volume_commands(config: ClusterConfig, master_ip: str) -> list[str]:
         + " nfs defaults,_netdev,nofail 0 0' >> /etc/fstab",
         f"mountpoint -q {data_path} || mount -t nfs master:{data_path} {data_path}",
     ]
+
+
+def _master_data_commands(config: ClusterConfig) -> list[str]:
+    """Render master-side HDFS and Spark data-directory setup commands."""
+    data_root = f"/home/{config.cluster.ssh_username}/data"
+    name_dir = f"{data_root}/hdfs/name"
+    history_dir = f"{data_root}/spark-history"
+    return [
+        f"install -d -m 0755 {data_root} {data_root}/hdfs {name_dir} {history_dir}",
+        "[ -f "
+        f"{name_dir}/current/VERSION ] || "
+        "/opt/hadoop/bin/hdfs namenode -format -nonInteractive",
+    ]
+
+
+def _worker_data_commands(config: ClusterConfig) -> list[str]:
+    """Render worker-side HDFS data-directory setup commands."""
+    data_root = f"/home/{config.cluster.ssh_username}/data"
+    data_dir = f"{data_root}/hdfs/data"
+    return [f"install -d -m 0755 {data_root} {data_root}/hdfs {data_dir}"]
 
 
 def _worker_netdata_commands(
@@ -540,18 +622,27 @@ def generate_master_cloud_init(
     bundle: Bundle,
     worker_ips: list[str],
     netdata_api_key: str | None = None,
+    *,
+    attached_volume_id: str | None = None,
+    allow_missing_runtime_secrets: bool = False,
 ) -> str:
     """Return cloud-init user-data bash script for the master."""
-    web_password = _require_env_var(
+    web_password = _env_var_or_placeholder(
         "HAILSTACK_WEB_PASSWORD",
         "HAILSTACK_WEB_PASSWORD required",
+        allow_missing=allow_missing_runtime_secrets,
+        placeholder="destroy-only-web-password",
     )
     volume_password: str | None = None
     if _volume_enabled(config):
-        volume_password = _require_env_var(
+        volume_password = _env_var_or_placeholder(
             "HAILSTACK_VOLUME_PASSWORD",
             "HAILSTACK_VOLUME_PASSWORD required when a data volume is attached",
+            allow_missing=allow_missing_runtime_secrets,
+            placeholder="destroy-only-volume-password",
         )
+        if attached_volume_id is None and allow_missing_runtime_secrets:
+            attached_volume_id = "destroy-only-volume-id"
     resolved_netdata_api_key = _resolve_netdata_api_key(netdata_api_key)
 
     username = config.cluster.ssh_username
@@ -590,13 +681,14 @@ def generate_master_cloud_init(
             "EOF_JUPYTER_CONFIG",
             _jupyter_config_content(web_password),
         ),
-        f"htpasswd -bc {HTPASSWD_PATH} hailstack {web_password!r}",
+        f"htpasswd -bc {HTPASSWD_PATH} hailstack {quote(web_password)}",
         "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 "
         f"-keyout {SSL_KEY_PATH} -out {SSL_CERT_PATH} -subj '/CN=hailstack'",
         *_here_doc(NGINX_SITE_PATH, "EOF_NGINX_SITE",
                    _nginx_config_content(config)),
         *_master_netdata_commands(config, resolved_netdata_api_key),
-        *_volume_commands(config, volume_password),
+        *_volume_commands(config, volume_password, attached_volume_id),
+        *_master_data_commands(config),
         *_lustre_commands(config),
         *_dns_commands(config),
         *_extras_commands(config),
@@ -652,6 +744,7 @@ def generate_worker_cloud_init(
         *_worker_spark_commands(),
         *_worker_netdata_commands(config, master_ip, resolved_netdata_api_key),
         *_worker_volume_commands(config, master_ip),
+        *_worker_data_commands(config),
         *_lustre_commands(config),
         *_dns_commands(config),
         *_extras_commands(config),

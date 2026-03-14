@@ -23,10 +23,13 @@
 
 """Acceptance tests for the hailstack CLI entry point."""
 
+import importlib
 import re
+from pathlib import Path
 
 from typer.testing import CliRunner
 
+from hailstack import runtime_paths as runtime_paths_module
 from hailstack.cli.main import app
 
 runner = CliRunner()
@@ -55,7 +58,8 @@ def test_version_flag_prints_semver() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert re.fullmatch(r"hailstack \d+\.\d+\.\d+\n", result.stdout) is not None
+    assert re.fullmatch(r"hailstack \d+\.\d+\.\d+\n",
+                        result.stdout) is not None
 
 
 def test_invalid_command_reports_error_on_stderr() -> None:
@@ -78,3 +82,40 @@ def test_create_help_shows_required_options() -> None:
     assert "--dotenv" in result.stdout
     assert "Load environment variables from a .env file before" in result.stdout
     assert "parsing config." in result.stdout
+
+
+def test_runtime_paths_import_does_not_create_workspace_on_import(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Keep CLI startup import-safe when the installed runtime home is not writable."""
+    fake_home = tmp_path / "readonly-home"
+    fake_home.mkdir()
+
+    checkout_git_dir = runtime_paths_module.CHECKOUT_ROOT / ".git"
+    original_exists = Path.exists
+    original_mkdir = Path.mkdir
+
+    def fake_exists(self: Path) -> bool:
+        if self == checkout_git_dir:
+            return False
+        return original_exists(self)
+
+    def fake_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == fake_home / ".hailstack" / "workspace":
+            raise AssertionError(
+                "runtime workspace should not be created at import time"
+            )
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_paths_module.Path, "exists", fake_exists)
+    monkeypatch.setattr(
+        runtime_paths_module.Path,
+        "home",
+        staticmethod(lambda: fake_home),
+    )
+    monkeypatch.setattr(runtime_paths_module.Path, "mkdir", fake_mkdir)
+
+    reloaded = importlib.reload(runtime_paths_module)
+
+    assert reloaded.RUNTIME_WORK_DIR == fake_home / ".hailstack" / "workspace"

@@ -80,9 +80,11 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | `cluster.worker_flavour` | OpenStack flavour for workers. If omitted, Hailstack reuses `cluster.master_flavour`. | `string` | `""` then resolved to `cluster.master_flavour` | `m2.2xlarge` |
 | `cluster.network_name` | Required OpenStack network for the management interface on all nodes. | `string` | `cloudforms_network` | `cloudforms_network` |
 | `cluster.lustre_network` | Optional second network name added to every node for Lustre access. | `string` | `""` | `lustre_network` |
+| `cluster.lustre_mount_target` | Lustre mount target written to `/etc/fstab` when `cluster.lustre_network` is set. | `string` | `10.1.0.1@tcp:/fsx` | `192.0.2.10@tcp:/fsx` |
 | `cluster.ssh_username` | Login user used by SSH-based commands and cloud-init paths. | `string` | `ubuntu` | `ubuntu` |
 | `cluster.monitoring` | Monitoring mode. Only `netdata` and `none` are accepted. | `string` | `netdata` | `netdata` |
 | `cluster.floating_ip` | Existing unassociated IPv4 address to attach to the master. Leave empty to allocate one. | `string` | `""` | `1.2.3.4` |
+| `cluster.floating_ip_pool` | Floating IP pool name used when `create` needs to allocate a master IP instead of reusing `cluster.floating_ip`. | `string` | `""` | `public` |
 
 ### `[packer]`
 
@@ -92,7 +94,7 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | --- | --- | --- | --- | --- |
 | `packer.base_image` | Source image name that Packer should boot before provisioning the Hailstack image. | `string` | required when `[packer]` is present | `ubuntu-22.04` |
 | `packer.flavour` | OpenStack flavour used during the image build. | `string` | `m2.medium` | `m2.medium` |
-| `packer.floating_ip_pool` | Floating IP pool name used when Packer or Pulumi needs to allocate a master IP instead of reusing `cluster.floating_ip`. | `string` | `""` | `public` |
+| `packer.floating_ip_pool` | Floating IP pool name used by Packer while building an image. `create` uses `cluster.floating_ip_pool`, but the legacy packer field is still accepted for backwards compatibility. | `string` | `""` | `public` |
 
 ### `[volumes]`
 
@@ -373,7 +375,7 @@ No. Rebuild when you switch to a bundle that does not already have a matching `h
 
 **Can I reuse an existing floating IP?**
 
-Yes. Set `cluster.floating_ip` to an existing unassociated IPv4 address. Leave it blank to let Pulumi allocate one, optionally using `packer.floating_ip_pool`.
+Yes. Set `cluster.floating_ip` to an existing unassociated IPv4 address. Leave it blank to let Pulumi allocate one, optionally using `cluster.floating_ip_pool`.
 
 **Can I turn monitoring off?**
 

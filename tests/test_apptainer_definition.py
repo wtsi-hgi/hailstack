@@ -87,10 +87,8 @@ def test_m1_acceptance_1_sif_contains_hailstack_executable() -> None:
     assert "ansible /opt/hailstack/ansible" in files_section
     assert "packer /opt/hailstack/packer" in files_section
     assert scripts_table["hailstack"] == "hailstack.cli.main:app"
-    assert (
-        "python3.14 -m pip install --no-cache-dir --editable /opt/hailstack"
-        in post_section
-    )
+    assert "python3.14 -m pip install --no-cache-dir /opt/hailstack" in post_section
+    assert "--editable /opt/hailstack" not in post_section
     assert 'exec hailstack "$@"' in runscript_section
 
 
@@ -106,10 +104,8 @@ def test_m1_acceptance_2_apptainer_run_version_prints_project_version() -> None:
     assert isinstance(project_table, dict)
 
     assert 'exec hailstack "$@"' in runscript_section
-    assert (
-        "python3.14 -m pip install --no-cache-dir --editable /opt/hailstack"
-        in post_section
-    )
+    assert "python3.14 -m pip install --no-cache-dir /opt/hailstack" in post_section
+    assert "--editable /opt/hailstack" not in post_section
     assert 'typer.echo(f"hailstack {__version__}")' in cli_main_source
     assert 'help="Show version and exit."' in cli_main_source
     assert (
@@ -136,7 +132,43 @@ def test_m1_acceptance_3_sif_contains_pulumi_packer_and_ansible_executables() ->
         in post_section
     )
     assert "unzip -o /tmp/packer.zip -d /usr/local/bin" in post_section
-    assert "python3.14 -m pip install --no-cache-dir ansible" in post_section
+    assert (
+        "python3.14 -m pip install --no-cache-dir ansible openstackclient"
+        in post_section
+    )
+
+
+def test_m1_acceptance_5_sif_contains_openstack_cli_for_create() -> None:
+    """Install the OpenStack CLI inside the container for create preflight."""
+    definition = _read_definition()
+    post_section = _section(definition, "post")
+
+    assert (
+        "python3.14 -m pip install --no-cache-dir ansible openstackclient"
+        in post_section
+    )
+
+
+def test_m1_acceptance_6_wheel_packages_runtime_assets() -> None:
+    """Ship runtime bundles, ansible, and packer assets in wheel installs."""
+    pyproject = _read_pyproject()
+    tool_table = pyproject["tool"]
+    assert isinstance(tool_table, dict)
+    hatch_table = tool_table["hatch"]
+    assert isinstance(hatch_table, dict)
+    build_table = hatch_table["build"]
+    assert isinstance(build_table, dict)
+    targets_table = build_table["targets"]
+    assert isinstance(targets_table, dict)
+    wheel_table = targets_table["wheel"]
+    assert isinstance(wheel_table, dict)
+    force_include = wheel_table["force-include"]
+    assert isinstance(force_include, dict)
+
+    assert force_include["bundles.toml"] == "hailstack/_data/bundles.toml"
+    assert force_include["ansible"] == "hailstack/_data/ansible"
+    assert force_include["packer"] == "hailstack/_data/packer"
+    assert force_include["example-config.toml"] == "hailstack/_data/example-config.toml"
 
 
 def test_m1_acceptance_4_definition_encodes_sub_500mb_size_contract() -> None:

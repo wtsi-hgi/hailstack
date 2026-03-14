@@ -30,6 +30,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/hailstack"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"ansible" = "hailstack/_data/ansible"
+"bundles.toml" = "hailstack/_data/bundles.toml"
+"example-config.toml" = "hailstack/_data/example-config.toml"
+"packer" = "hailstack/_data/packer"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

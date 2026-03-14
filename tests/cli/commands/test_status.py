@@ -25,6 +25,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -51,12 +52,16 @@ class FakeStatusStackRunner:
             "bundle_id": "bundle-from-stack",
             "master_public_ip": "198.51.100.10",
             "master_private_ip": "10.0.0.10",
+            "master_flavour": "m2.2xlarge",
+            "monitoring_enabled": True,
             "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
             "worker_names": [
                 "test-cluster-worker-01",
                 "test-cluster-worker-02",
                 "test-cluster-worker-03",
             ],
+            "attached_volume_name": "my-data-vol",
+            "managed_volume_size_gb": 500,
         }
         self.error = error
         self.calls = 0
@@ -82,10 +87,21 @@ class FakeStatusProbe:
         self.detailed_status = detailed_status
         self.calls: list[dict[str, object]] = []
 
-    def probe(self, inventory: object, *, ssh_username: str) -> object:
+    def probe(
+        self,
+        inventory: object,
+        *,
+        ssh_username: str,
+        ssh_key_path: Path | None = None,
+    ) -> object:
         """Record the requested inventory and return the configured snapshot."""
         self.calls.append(
-            {"inventory": inventory, "ssh_username": ssh_username})
+            {
+                "inventory": inventory,
+                "ssh_username": ssh_username,
+                "ssh_key_path": ssh_key_path,
+            }
+        )
         return self.detailed_status
 
 
@@ -324,6 +340,35 @@ def test_status_detailed_human_output_includes_resource_usage(
     assert "worker-03: CPU 12%  MEM 34%  DISK 8%" in result.stdout
 
 
+def test_status_detailed_passes_explicit_ssh_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread --ssh-key through the detailed SSH status probe."""
+    config_path = _write_config(tmp_path / "status.toml")
+    ssh_key_path = tmp_path / "cluster-key"
+    ssh_key_path.write_text("PRIVATE KEY", encoding="utf-8")
+    _, fake_probe = _install_fakes(
+        monkeypatch,
+        probe=FakeStatusProbe(detailed_status=_detailed_status()),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "status",
+            "--config",
+            str(config_path),
+            "--detailed",
+            "--ssh-key",
+            str(ssh_key_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert fake_probe.calls[0]["ssh_key_path"] == ssh_key_path
+
+
 def test_status_json_output_is_machine_readable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -392,6 +437,206 @@ def test_status_json_detailed_output_includes_services_and_resources(
                "worker-02" for resource in payload["resources"])
 
 
+def test_status_prefers_deployed_outputs_over_drifted_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render deployed flavour and volume details from stack outputs."""
+    config_path = _write_config(tmp_path / "status.toml")
+    _install_fakes(
+        monkeypatch,
+        stack_runner=FakeStatusStackRunner(
+            outputs={
+                "cluster_name": "test-cluster",
+                "bundle_id": "bundle-from-stack",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "master_flavour": "m2.4xlarge",
+                "monitoring_enabled": True,
+                "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
+                "worker_names": [
+                    "test-cluster-worker-01",
+                    "test-cluster-worker-02",
+                    "test-cluster-worker-03",
+                ],
+                "attached_volume_name": "deployed-data-vol",
+                "managed_volume_size_gb": 750,
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Master:  198.51.100.10 (m2.4xlarge)" in result.stdout
+    assert "Volume:  deployed-data-vol (750GB)" in result.stdout
+
+
+def test_status_uses_public_ip_without_requiring_private_ip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow older stack outputs that only export the public master address."""
+    config_path = _write_config(tmp_path / "status.toml")
+    _install_fakes(
+        monkeypatch,
+        stack_runner=FakeStatusStackRunner(
+            outputs={
+                "cluster_name": "test-cluster",
+                "bundle_id": "bundle-from-stack",
+                "master_public_ip": "198.51.100.10",
+                "master_flavour": "m2.2xlarge",
+                "monitoring_enabled": True,
+                "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
+                "worker_names": [
+                    "test-cluster-worker-01",
+                    "test-cluster-worker-02",
+                    "test-cluster-worker-03",
+                ],
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Master:  198.51.100.10 (m2.2xlarge)" in result.stdout
+
+
+def test_status_detailed_prefers_deployed_service_metadata_over_drifted_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe services from deployed metadata rather than drifted local config."""
+    config_path = tmp_path / "status.toml"
+    config_path.write_text(
+        (
+            "[cluster]\n"
+            'name = "test-cluster"\n'
+            'bundle = "bundle-from-config"\n'
+            "num_workers = 3\n"
+            'master_flavour = "m2.2xlarge"\n'
+            'worker_flavour = "m2.xlarge"\n'
+            'network_name = "private-net"\n'
+            'ssh_username = "ubuntu"\n'
+            'monitoring = "none"\n\n'
+            "[ceph_s3]\n"
+            'endpoint = "https://ceph.example.invalid"\n'
+            'bucket = "hailstack-state"\n'
+            'access_key = "state-access"\n'
+            'secret_key = "state-secret"\n\n'
+            "[ssh_keys]\n"
+            'public_keys = ["ssh-ed25519 AAAA primary@test"]\n'
+        ),
+        encoding="utf-8",
+    )
+    _, fake_probe = _install_fakes(
+        monkeypatch,
+        stack_runner=FakeStatusStackRunner(
+            outputs={
+                "cluster_name": "test-cluster",
+                "bundle_id": "bundle-from-stack",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "master_flavour": "m2.2xlarge",
+                "monitoring_enabled": True,
+                "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
+                "worker_names": [
+                    "test-cluster-worker-01",
+                    "test-cluster-worker-02",
+                    "test-cluster-worker-03",
+                ],
+                "attached_volume_name": "deployed-data-vol",
+                "managed_volume_size_gb": 750,
+            }
+        ),
+        probe=FakeStatusProbe(detailed_status=_detailed_status()),
+    )
+
+    result = runner.invoke(
+        app, ["status", "--config", str(config_path), "--detailed"])
+
+    assert result.exit_code == 0
+    inventory = fake_probe.calls[0]["inventory"]
+    master_node = next(node for node in inventory if node.role == "master")
+    worker_node = next(node for node in inventory if node.role == "worker")
+    assert "netdata" in master_node.services
+    assert "nfs-server" in master_node.services
+    assert "netdata" in worker_node.services
+
+
+def test_status_suppresses_drifted_volume_when_stack_outputs_report_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat deployed volume metadata as authoritative when no volume is attached."""
+    config_path = _write_config(tmp_path / "status.toml")
+    _install_fakes(
+        monkeypatch,
+        stack_runner=FakeStatusStackRunner(
+            outputs={
+                "cluster_name": "test-cluster",
+                "bundle_id": "bundle-from-stack",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "master_flavour": "m2.4xlarge",
+                "monitoring_enabled": True,
+                "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
+                "worker_names": [
+                    "test-cluster-worker-01",
+                    "test-cluster-worker-02",
+                    "test-cluster-worker-03",
+                ],
+                "managed_volume_size_gb": 0,
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Volume:" not in result.stdout
+
+
+def test_status_detailed_skips_nfs_probe_when_stack_outputs_report_no_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Avoid probing NFS when deployed outputs explicitly report no volume."""
+    config_path = _write_config(tmp_path / "status.toml")
+    _, fake_probe = _install_fakes(
+        monkeypatch,
+        stack_runner=FakeStatusStackRunner(
+            outputs={
+                "cluster_name": "test-cluster",
+                "bundle_id": "bundle-from-stack",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "master_flavour": "m2.2xlarge",
+                "monitoring_enabled": True,
+                "worker_private_ips": ["10.0.0.21", "10.0.0.22", "10.0.0.23"],
+                "worker_names": [
+                    "test-cluster-worker-01",
+                    "test-cluster-worker-02",
+                    "test-cluster-worker-03",
+                ],
+                "managed_volume_size_gb": 0,
+            }
+        ),
+        probe=FakeStatusProbe(detailed_status=_detailed_status()),
+    )
+
+    result = runner.invoke(
+        app,
+        ["status", "--config", str(config_path), "--detailed"],
+    )
+
+    assert result.exit_code == 0
+    inventory = fake_probe.calls[0]["inventory"]
+    master_node = next(node for node in inventory if node.role == "master")
+    assert "nfs-server" not in master_node.services
+
+
 def test_status_cluster_not_found_raises_documented_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -432,3 +677,122 @@ def test_status_detailed_marks_unreachable_workers_without_failing_others(
     assert "unreachable (worker-02)" in result.stdout
     assert "worker-01, worker-03" in result.stdout
     assert "worker-02: unreachable" in result.stdout
+
+
+def test_status_detailed_surfaces_ssh_auth_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise credential errors instead of rendering them as unreachable nodes."""
+
+    async def fake_check_service_health_targets(
+        *,
+        hosts: object,
+        ssh_username: str,
+        services: object,
+        ssh_key_path: Path | None = None,
+    ) -> list[object]:
+        del hosts, ssh_username, services, ssh_key_path
+        return [status_module.SSHError("worker-01: Permission denied (publickey)")]
+
+    async def fake_gather_resource_usage_targets(
+        *,
+        hosts: object,
+        ssh_username: str,
+        ssh_key_path: Path | None = None,
+    ) -> list[object]:
+        del hosts, ssh_username, ssh_key_path
+        return [status_module.SSHError("worker-01: Permission denied (publickey)")]
+
+    monkeypatch.setattr(
+        status_module,
+        "check_service_health_targets",
+        fake_check_service_health_targets,
+    )
+    monkeypatch.setattr(
+        status_module,
+        "gather_resource_usage_targets",
+        fake_gather_resource_usage_targets,
+    )
+
+    probe = status_module.SSHStatusProbe()
+    inventory = [
+        status_module.StatusNode(
+            name="worker-01",
+            host="10.0.0.21",
+            role="worker",
+            services=("spark-worker",),
+            jump_host="198.51.100.10",
+        )
+    ]
+
+    with pytest.raises(status_module.SSHError, match="Permission denied"):
+        probe.probe(inventory, ssh_username="ubuntu")
+
+
+def test_status_probe_treats_legacy_jupyter_service_name_as_jupyter_lab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Collapse legacy hailstack-jupyterlab probes into the JupyterLab status row."""
+
+    async def fake_check_service_health_targets(
+        *,
+        hosts: object,
+        ssh_username: str,
+        services: object,
+        ssh_key_path: Path | None = None,
+    ) -> list[object]:
+        del hosts, ssh_username, ssh_key_path
+        assert services == {"master": ("jupyter-lab", "hailstack-jupyterlab")}
+        return [
+            SimpleNamespace(name="jupyter-lab", active=False, node="master"),
+            SimpleNamespace(name="hailstack-jupyterlab",
+                            active=True, node="master"),
+        ]
+
+    async def fake_gather_resource_usage_targets(
+        *,
+        hosts: object,
+        ssh_username: str,
+        ssh_key_path: Path | None = None,
+    ) -> list[object]:
+        del hosts, ssh_username, ssh_key_path
+        return [
+            SimpleNamespace(
+                hostname="master",
+                cpu_percent=23.0,
+                memory_percent=45.0,
+                disk_percent=12.0,
+            )
+        ]
+
+    monkeypatch.setattr(
+        status_module,
+        "check_service_health_targets",
+        fake_check_service_health_targets,
+    )
+    monkeypatch.setattr(
+        status_module,
+        "gather_resource_usage_targets",
+        fake_gather_resource_usage_targets,
+    )
+
+    probe = status_module.SSHStatusProbe()
+    result = probe.probe(
+        [
+            status_module.StatusNode(
+                name="master",
+                host="198.51.100.10",
+                role="master",
+                services=("jupyter-lab", "hailstack-jupyterlab"),
+            )
+        ],
+        ssh_username="ubuntu",
+    )
+
+    assert result.services == [
+        status_module.ServiceStatus(
+            name="jupyter-lab",
+            status="active",
+            node="master",
+        )
+    ]

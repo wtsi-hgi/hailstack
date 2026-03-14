@@ -88,7 +88,7 @@ class CephS3Uploader:
 
     def put_object(self, *, key: str, body: bytes, content_type: str) -> None:
         """Upload one object to Ceph S3."""
-        parsed_endpoint = urlsplit(self._config.endpoint.rstrip("/"))
+        parsed_endpoint = _parse_ceph_endpoint(self._config.endpoint)
         if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
             raise S3Error(f"Invalid Ceph S3 endpoint: {self._config.endpoint}")
 
@@ -165,6 +165,14 @@ class CephS3Uploader:
             ) from error
 
 
+def _parse_ceph_endpoint(endpoint: str):
+    """Return a parsed Ceph endpoint, defaulting bare hosts to HTTPS."""
+    normalized_endpoint = endpoint.rstrip("/")
+    if "://" not in normalized_endpoint:
+        normalized_endpoint = f"https://{normalized_endpoint}"
+    return urlsplit(normalized_endpoint)
+
+
 def upload_rollout(
     manifest: RolloutManifest,
     node_results: Sequence[NodeResult],
@@ -179,12 +187,6 @@ def upload_rollout(
         f"{_timestamp_key(resolved_manifest.timestamp)}"
     )
     manifest_key = f"{rollout_prefix}/manifest.json"
-    manifest_body = _json_bytes(resolved_manifest.model_dump(mode="json"))
-    uploader.put_object(
-        key=manifest_key,
-        body=manifest_body,
-        content_type="application/json",
-    )
     for node_result in node_results:
         node_key = f"{rollout_prefix}/nodes/{node_result.hostname}.json"
         uploader.put_object(
@@ -192,6 +194,12 @@ def upload_rollout(
             body=_json_bytes(node_result.model_dump(mode="json")),
             content_type="application/json",
         )
+    manifest_body = _json_bytes(resolved_manifest.model_dump(mode="json"))
+    uploader.put_object(
+        key=manifest_key,
+        body=manifest_body,
+        content_type="application/json",
+    )
     return f"s3://{ceph_s3_config.bucket}/{manifest_key}"
 
 

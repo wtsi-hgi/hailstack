@@ -33,10 +33,19 @@ from typing import Protocol
 from hailstack.config.compatibility import Bundle
 from hailstack.config.schema import ClusterConfig
 from hailstack.errors import PackerError
+from hailstack.runtime_paths import (
+    PACKER_ROOT,
+)
+from hailstack.runtime_paths import (
+    PACKER_SCRIPTS_PATH as RUNTIME_PACKER_SCRIPTS_PATH,
+)
+from hailstack.runtime_paths import (
+    PACKER_TEMPLATE_PATH as RUNTIME_PACKER_TEMPLATE_PATH,
+)
 
-PACKER_ROOT_PATH = Path(__file__).resolve().parents[3] / "packer"
-PACKER_TEMPLATE_PATH = PACKER_ROOT_PATH / "hailstack.pkr.hcl"
-PACKER_SCRIPTS_PATH = PACKER_ROOT_PATH / "scripts"
+PACKER_ROOT_PATH = PACKER_ROOT
+PACKER_TEMPLATE_PATH = RUNTIME_PACKER_TEMPLATE_PATH
+PACKER_SCRIPTS_PATH = RUNTIME_PACKER_SCRIPTS_PATH
 REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/base.sh"),
     Path("scripts/ubuntu/packages.sh"),
@@ -141,7 +150,8 @@ def _validate_packer_assets(template_path: Path) -> None:
     if non_executable_paths:
         problems.append(f"not executable: {', '.join(non_executable_paths)}")
     if problems:
-        raise PackerError(f"Missing required Packer assets: {'; '.join(problems)}")
+        raise PackerError(
+            f"Missing required Packer assets: {'; '.join(problems)}")
 
 
 def build_image(
@@ -157,7 +167,8 @@ def build_image(
     _validate_packer_assets(template_path)
     active_logger.info("Packer starting")
 
-    result = runner(_packer_command(template_path, _packer_vars(config, bundle)))
+    result = runner(_packer_command(
+        template_path, _packer_vars(config, bundle)))
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise PackerError(f"Packer build failed: {detail}")

@@ -8,9 +8,9 @@ curl -fsSL "https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSIO
 tar -xzf "$archive_path" -C /opt
 ln -sfn "$install_dir" /opt/hadoop
 
-cat >/etc/systemd/system/hadoop-namenode.service <<'EOF'
+cat >/etc/systemd/system/hdfs-namenode.service <<'EOF'
 [Unit]
-Description=Hadoop NameNode
+Description=HDFS NameNode
 After=network.target
 
 [Service]
@@ -23,9 +23,9 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-cat >/etc/systemd/system/hadoop-datanode.service <<'EOF'
+cat >/etc/systemd/system/hdfs-datanode.service <<'EOF'
 [Unit]
-Description=Hadoop DataNode
+Description=HDFS DataNode
 After=network.target
 
 [Service]
@@ -38,7 +38,55 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/yarn-rm.service <<'EOF'
+[Unit]
+Description=YARN ResourceManager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hadoop/bin/yarn --daemon start resourcemanager
+ExecStop=/opt/hadoop/bin/yarn --daemon stop resourcemanager
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/yarn-nm.service <<'EOF'
+[Unit]
+Description=YARN NodeManager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hadoop/bin/yarn --daemon start nodemanager
+ExecStop=/opt/hadoop/bin/yarn --daemon stop nodemanager
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/mapred-history.service <<'EOF'
+[Unit]
+Description=MapReduce History Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hadoop/bin/mapred --daemon start historyserver
+ExecStop=/opt/hadoop/bin/mapred --daemon stop historyserver
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-test -f /etc/systemd/system/hadoop-namenode.service
-test -f /etc/systemd/system/hadoop-datanode.service
+test -f /etc/systemd/system/hdfs-namenode.service
+test -f /etc/systemd/system/hdfs-datanode.service
+test -f /etc/systemd/system/yarn-rm.service
+test -f /etc/systemd/system/yarn-nm.service
+test -f /etc/systemd/system/mapred-history.service
 /opt/hadoop/bin/hadoop version | grep -F "$HADOOP_VERSION"

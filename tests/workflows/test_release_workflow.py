@@ -29,8 +29,7 @@ from typing import cast
 import yaml
 
 WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[2] /
-    ".github" / "workflows" / "release.yml"
+    Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
 )
 ROOT_BUILD_COMMAND = (
     'sudo apptainer build "dist/hailstack-${GITHUB_REF_NAME}.sif" Apptainer.def'
@@ -124,8 +123,7 @@ def test_release_workflow_uploads_sif_asset_to_github_release() -> None:
     assert ROOT_BUILD_COMMAND in build_script
 
     release_step = _release_step()
-    release_inputs = _require_dict(
-        release_step["with"], context="release step inputs")
+    release_inputs = _require_dict(release_step["with"], context="release step inputs")
     assert (
         _require_str(release_inputs["files"], context="release asset path")
         == "dist/hailstack-${{ github.ref_name }}.sif"
@@ -137,8 +135,7 @@ def test_release_workflow_builds_with_explicit_privilege_on_github_runners() -> 
     install_step = _step_named("Install Apptainer")
     build_step = _step_named("Build Apptainer SIF")
 
-    install_script = _require_str(
-        install_step["run"], context="install step run")
+    install_script = _require_str(install_step["run"], context="install step run")
     build_script = _require_str(build_step["run"], context="build step run")
 
     assert "sudo apt-get install -y apptainer" in install_script
@@ -151,15 +148,12 @@ def test_release_workflow_builds_with_explicit_privilege_on_github_runners() -> 
 def test_release_workflow_enables_generated_release_notes() -> None:
     """Generate GitHub release notes automatically from tagged commits."""
     workflow = _load_workflow()
-    permissions = _require_dict(
-        workflow["permissions"], context="workflow permissions")
+    permissions = _require_dict(workflow["permissions"], context="workflow permissions")
     release_step = _release_step()
-    release_inputs = _require_dict(
-        release_step["with"], context="release step inputs")
+    release_inputs = _require_dict(release_step["with"], context="release step inputs")
 
     assert (
-        _require_str(permissions["contents"],
-                     context="contents permission") == "write"
+        _require_str(permissions["contents"], context="contents permission") == "write"
     )
     assert (
         _require_bool(

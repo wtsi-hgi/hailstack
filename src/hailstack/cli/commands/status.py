@@ -26,8 +26,6 @@
 import asyncio
 import json
 import logging
-import os
-import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -39,7 +37,7 @@ import typer
 from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.errors import PulumiError, SSHError
-from hailstack.pulumi.stack import REPOSITORY_ROOT, AutomationStackRunner
+from hailstack.pulumi.stack import AutomationStackRunner
 from hailstack.ssh.health import (
     HealthProbeTarget,
     check_service_health_targets,
@@ -50,7 +48,7 @@ _MASTER_SERVICE_NAMES = (
     "spark-master",
     "hdfs-namenode",
     "yarn-rm",
-    "hailstack-jupyterlab",
+    "jupyter-lab",
     "spark-history-server",
     "nginx",
     "mapred-history",
@@ -60,6 +58,9 @@ _WORKER_SERVICE_NAMES = (
     "hdfs-datanode",
     "yarn-nm",
 )
+_SERVICE_NAME_ALIASES = {
+    "jupyter-lab": ("jupyter-lab", "hailstack-jupyterlab"),
+}
 _SERVICE_STATUS_ORDER = {"active": 0, "inactive": 1, "unreachable": 2}
 
 
@@ -147,6 +148,7 @@ class StatusProbe(Protocol):
         inventory: Sequence[StatusNode],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None = None,
     ) -> DetailedClusterStatus:
         """Return service and resource state for the provided inventory."""
         ...
@@ -164,40 +166,11 @@ class PulumiStatusStackRunner:
         """Return JSON stack outputs for the configured cluster."""
         self._automation_runner.check_backend_access(config)
         try:
-            result = subprocess.run(
-                [
-                    "pulumi",
-                    "stack",
-                    "output",
-                    "--json",
-                    "--stack",
-                    f"hailstack-{config.cluster.name}",
-                ],
-                capture_output=True,
-                check=False,
-                cwd=REPOSITORY_ROOT,
-                env=_pulumi_env(config),
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise PulumiError("Pulumi CLI not found") from error
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            if _is_cluster_not_found(detail):
-                raise PulumiError("Cluster not found")
-            raise PulumiError(f"Unable to read Pulumi stack outputs: {detail}")
-
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise PulumiError(
-                "Pulumi stack output was not valid JSON") from error
-
-        if not isinstance(payload, dict):
-            raise PulumiError("Pulumi stack output must be a JSON object")
-
-        return cast(Mapping[str, object], payload)
+            return self._automation_runner.current_stack_outputs(config)
+        except PulumiError as error:
+            if _is_cluster_not_found(str(error)):
+                raise PulumiError("Cluster not found") from error
+            raise
 
 
 class SSHStatusProbe:
@@ -208,15 +181,23 @@ class SSHStatusProbe:
         inventory: Sequence[StatusNode],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None = None,
     ) -> DetailedClusterStatus:
         """Probe the requested nodes and return structured health details."""
-        return asyncio.run(self._probe_details(inventory, ssh_username=ssh_username))
+        return asyncio.run(
+            self._probe_details(
+                inventory,
+                ssh_username=ssh_username,
+                ssh_key_path=ssh_key_path,
+            )
+        )
 
     async def _probe_details(
         self,
         inventory: Sequence[StatusNode],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None,
     ) -> DetailedClusterStatus:
         """Probe services and resources concurrently via the ssh health module."""
         hosts = [
@@ -233,17 +214,22 @@ class SSHStatusProbe:
                 hosts=hosts,
                 ssh_username=ssh_username,
                 services=services_by_node,
+                ssh_key_path=ssh_key_path,
             ),
             gather_resource_usage_targets(
                 hosts=hosts,
                 ssh_username=ssh_username,
+                ssh_key_path=ssh_key_path,
             ),
         )
+
+        _raise_for_non_transport_ssh_errors(service_results)
+        _raise_for_non_transport_ssh_errors(resource_results)
 
         unreachable_service_nodes = _unreachable_nodes(service_results)
         services = [
             ServiceStatus(
-                name=service.name,
+                name=_canonical_service_name(service.name),
                 status="active" if service.active else "inactive",
                 node=service.node,
             )
@@ -254,8 +240,9 @@ class SSHStatusProbe:
             ServiceStatus(name=service, status="unreachable", node=node.name)
             for node in inventory
             if node.name in unreachable_service_nodes
-            for service in node.services
+            for service in _display_service_names(node.services)
         )
+        services = _normalize_service_statuses(services)
 
         unreachable_resource_nodes = _unreachable_nodes(resource_results)
         resources = [
@@ -292,11 +279,37 @@ def _unreachable_nodes(
     """Extract unreachable hostnames from per-host SSHError placeholders."""
     unreachable: set[str] = set()
     for result in results:
-        if not isinstance(result, SSHError):
+        if not isinstance(result, SSHError) or not _is_transport_ssh_error(result):
             continue
         node_name, _, _message = str(result).partition(":")
         unreachable.add(node_name)
     return unreachable
+
+
+def _raise_for_non_transport_ssh_errors(results: Sequence[object]) -> None:
+    """Propagate SSH failures that are not plain transport outages."""
+    for result in results:
+        if isinstance(result, SSHError) and not _is_transport_ssh_error(result):
+            raise result
+
+
+def _is_transport_ssh_error(error: SSHError) -> bool:
+    """Report whether an SSH error should be rendered as an unreachable node."""
+    lowered = str(error).lower()
+    return any(
+        fragment in lowered
+        for fragment in (
+            "unable to reach node",
+            "connection refused",
+            "could not resolve hostname",
+            "connection timed out",
+            "operation timed out",
+            "no route to host",
+            "connection closed",
+            "closed by remote host",
+            "connection reset",
+        )
+    )
 
 
 def get_status_logger() -> logging.Logger:
@@ -319,14 +332,6 @@ def create_status_stack_runner(logger: logging.Logger) -> StatusStackRunner:
 def create_status_probe() -> StatusProbe:
     """Create the default detailed SSH probe implementation."""
     return SSHStatusProbe()
-
-
-def _pulumi_env(config: ClusterConfig) -> dict[str, str]:
-    """Build the environment required for Pulumi backend access."""
-    env = dict(os.environ)
-    env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
-    env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
-    return env
 
 
 def _is_cluster_not_found(detail: str) -> bool:
@@ -353,11 +358,9 @@ def _resolve_summary(
         "bundle_id",
         default=config.cluster.bundle,
     )
-    master_ip = _require_output_str(
-        outputs,
-        "master_public_ip",
-        default=_require_output_str(outputs, "master_private_ip"),
-    )
+    master_ip = _optional_output_str(outputs, "master_public_ip")
+    if master_ip is None:
+        master_ip = _require_output_str(outputs, "master_private_ip")
     worker_names = _require_output_str_list(outputs, "worker_names")
     worker_ips = _require_output_str_list(outputs, "worker_private_ips")
     if len(worker_names) != len(worker_ips):
@@ -375,14 +378,19 @@ def _resolve_summary(
         bundle=bundle,
         master_name="master",
         master_ip=master_ip,
-        master_flavour=config.cluster.master_flavour,
+        master_flavour=_require_output_str(
+            outputs,
+            "master_flavour",
+            default=config.cluster.master_flavour,
+        ),
         workers=workers,
-        volume=_resolve_volume(config),
+        volume=_resolve_volume(outputs, config),
     )
 
 
 def _resolve_inventory(
     summary: ClusterSummary,
+    outputs: Mapping[str, object],
     config: ClusterConfig,
     *,
     master_jump_host: str | None,
@@ -393,7 +401,7 @@ def _resolve_inventory(
             name=summary.master_name,
             host=summary.master_ip,
             role="master",
-            services=_master_services(config),
+            services=_master_services(outputs, config),
         )
     ]
     inventory.extend(
@@ -401,7 +409,7 @@ def _resolve_inventory(
             name=worker.name,
             host=worker.ip,
             role="worker",
-            services=_worker_services(config),
+            services=_worker_services(outputs, config),
             jump_host=master_jump_host,
         )
         for worker in summary.workers
@@ -417,29 +425,108 @@ def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise PulumiError(
             f"Pulumi stack output '{key}' was missing or invalid")
+    return value.strip()
+
+
+def _optional_output_int(outputs: Mapping[str, object], key: str) -> int | None:
+    """Extract an optional integer output and return None when absent."""
+    value = outputs.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise PulumiError(
+            f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
-def _master_services(config: ClusterConfig) -> tuple[str, ...]:
+def _optional_output_bool(outputs: Mapping[str, object], key: str) -> bool | None:
+    """Extract an optional boolean output and return None when absent."""
+    value = outputs.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise PulumiError(
+            f"Pulumi stack output '{key}' was missing or invalid")
+    return value
+
+
+def _monitoring_enabled(outputs: Mapping[str, object], config: ClusterConfig) -> bool:
+    """Return the deployed monitoring state, falling back to config when absent."""
+    resolved = _optional_output_bool(outputs, "monitoring_enabled")
+    if resolved is not None:
+        return resolved
+    return config.cluster.monitoring == "netdata"
+
+
+def _volume_enabled(outputs: Mapping[str, object], config: ClusterConfig) -> bool:
+    """Return whether the deployed cluster has a shared volume attached."""
+    if _optional_output_str(outputs, "attached_volume_name") is not None:
+        return True
+    if _has_deployed_volume_metadata(outputs):
+        return False
+    return _resolve_configured_volume(config) is not None
+
+
+def _master_services(
+    outputs: Mapping[str, object],
+    config: ClusterConfig,
+) -> tuple[str, ...]:
     """Return the master services to inspect for detailed status."""
-    services: list[str] = list(_MASTER_SERVICE_NAMES)
-    if config.cluster.monitoring == "netdata":
+    services: list[str] = []
+    for service in _MASTER_SERVICE_NAMES:
+        services.extend(_service_probe_names(service))
+    if _monitoring_enabled(outputs, config):
         services.append("netdata")
-    if config.volumes.create or bool(config.volumes.existing_volume_id.strip()):
+    if _volume_enabled(outputs, config):
         services.append("nfs-server")
     return tuple(services)
 
 
-def _worker_services(config: ClusterConfig) -> tuple[str, ...]:
+def _worker_services(
+    outputs: Mapping[str, object],
+    config: ClusterConfig,
+) -> tuple[str, ...]:
     """Return the worker services to inspect for detailed status."""
     services: list[str] = list(_WORKER_SERVICE_NAMES)
-    if config.cluster.monitoring == "netdata":
+    if _monitoring_enabled(outputs, config):
         services.append("netdata")
     return tuple(services)
 
 
-def _resolve_volume(config: ClusterConfig) -> VolumeStatus | None:
-    """Return the configured shared-volume summary when one is attached."""
+def _resolve_volume(
+    outputs: Mapping[str, object],
+    config: ClusterConfig,
+) -> VolumeStatus | None:
+    """Return the deployed shared-volume summary when one is attached."""
+    output_name = _optional_output_str(outputs, "attached_volume_name")
+    if output_name is not None:
+        output_size_gb = _optional_output_int(
+            outputs, "managed_volume_size_gb")
+        return VolumeStatus(
+            name=output_name,
+            size_gb=output_size_gb if output_size_gb and output_size_gb > 0 else None,
+        )
+
+    if _has_deployed_volume_metadata(outputs):
+        return None
+
+    return _resolve_configured_volume(config)
+
+
+def _has_deployed_volume_metadata(outputs: Mapping[str, object]) -> bool:
+    """Return whether stack outputs explicitly describe deployed volume state."""
+    return any(
+        key in outputs
+        for key in (
+            "attached_volume_name",
+            "attached_volume_id",
+            "managed_volume_size_gb",
+        )
+    )
+
+
+def _resolve_configured_volume(config: ClusterConfig) -> VolumeStatus | None:
+    """Return the config-derived volume summary when stack metadata is absent."""
     if config.volumes.create:
         name = config.volumes.name.strip() or f"{config.cluster.name}-vol"
         return VolumeStatus(name=name, size_gb=config.volumes.size_gb)
@@ -447,6 +534,48 @@ def _resolve_volume(config: ClusterConfig) -> VolumeStatus | None:
         name = config.volumes.name.strip() or config.volumes.existing_volume_id.strip()
         return VolumeStatus(name=name, size_gb=None)
     return None
+
+
+def _service_probe_names(service_name: str) -> tuple[str, ...]:
+    """Return the remote service names that satisfy one logical service."""
+    return _SERVICE_NAME_ALIASES.get(service_name, (service_name,))
+
+
+def _canonical_service_name(service_name: str) -> str:
+    """Return the display name for a probed systemd unit."""
+    for canonical_name, aliases in _SERVICE_NAME_ALIASES.items():
+        if service_name in aliases:
+            return canonical_name
+    return service_name
+
+
+def _display_service_names(service_names: Sequence[str]) -> tuple[str, ...]:
+    """Collapse probe aliases to the logical service names shown to users."""
+    ordered_names: list[str] = []
+    seen: set[str] = set()
+    for service_name in service_names:
+        canonical_name = _canonical_service_name(service_name)
+        if canonical_name in seen:
+            continue
+        seen.add(canonical_name)
+        ordered_names.append(canonical_name)
+    return tuple(ordered_names)
+
+
+def _normalize_service_statuses(
+    services: Sequence[ServiceStatus],
+) -> list[ServiceStatus]:
+    """Collapse aliased service probes into one user-facing row per node/status."""
+    best_by_name: dict[tuple[str, str], ServiceStatus] = {}
+    for service in services:
+        key = (service.name, service.node)
+        existing = best_by_name.get(key)
+        if existing is None or (
+            _SERVICE_STATUS_ORDER[service.status]
+            < _SERVICE_STATUS_ORDER[existing.status]
+        ):
+            best_by_name[key] = service
+    return list(best_by_name.values())
 
 
 def _require_output_str(
@@ -648,6 +777,11 @@ def status(
         bool,
         typer.Option("--json", help="JSON output."),
     ] = False,
+    ssh_key: Annotated[
+        Path | None,
+        typer.Option(
+            "--ssh-key", help="SSH private key path (default: agent)."),
+    ] = None,
     dotenv: Annotated[
         Path | None,
         typer.Option(
@@ -672,11 +806,13 @@ def status(
         details = create_status_probe().probe(
             _resolve_inventory(
                 summary,
+                outputs,
                 loaded_config,
                 master_jump_host=_optional_output_str(
                     outputs, "master_public_ip"),
             ),
             ssh_username=loaded_config.cluster.ssh_username,
+            ssh_key_path=ssh_key,
         )
 
     if json_output:

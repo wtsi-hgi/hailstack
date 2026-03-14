@@ -18,8 +18,8 @@ From: python:3.14-slim
     -o /tmp/packer.zip
   unzip -o /tmp/packer.zip -d /usr/local/bin
   rm /tmp/packer.zip
-  python3.14 -m pip install --no-cache-dir ansible
-  python3.14 -m pip install --no-cache-dir --editable /opt/hailstack
+  python3.14 -m pip install --no-cache-dir ansible openstackclient
+  python3.14 -m pip install --no-cache-dir /opt/hailstack
   apt-get clean && rm -rf /var/lib/apt/lists/*
 
 %environment

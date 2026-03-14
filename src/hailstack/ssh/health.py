@@ -25,10 +25,20 @@
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
 from hailstack.errors import SSHError
+
+_SSH_HOST_KEY_OPTIONS = (
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "GlobalKnownHostsFile=/dev/null",
+)
 
 
 class HealthProbeTarget(BaseModel):
@@ -66,12 +76,14 @@ async def check_service_health(
     hosts: Sequence[str],
     ssh_username: str,
     services: Mapping[str, Sequence[str]],
+    ssh_key_path: Path | None = None,
 ) -> list[ServiceStatus | SSHError]:
     """SSH to each host and collect systemd service activity states."""
     return await check_service_health_targets(
         hosts=_hosts_from_strings(hosts),
         ssh_username=ssh_username,
         services=services,
+        ssh_key_path=ssh_key_path,
     )
 
 
@@ -79,6 +91,7 @@ async def check_service_health_targets(
     hosts: Sequence[HealthProbeTarget],
     ssh_username: str,
     services: Mapping[str, Sequence[str]],
+    ssh_key_path: Path | None = None,
 ) -> list[ServiceStatus | SSHError]:
     """SSH to structured hosts and collect systemd service activity states."""
     probe_results = await asyncio.gather(
@@ -87,6 +100,7 @@ async def check_service_health_targets(
                 host,
                 ssh_username=ssh_username,
                 service_names=services.get(host.name, ()),
+                ssh_key_path=ssh_key_path,
             )
             for host in hosts
         ],
@@ -98,22 +112,31 @@ async def check_service_health_targets(
 async def gather_resource_usage(
     hosts: Sequence[str],
     ssh_username: str,
+    ssh_key_path: Path | None = None,
 ) -> list[NodeResources | SSHError]:
     """SSH to each host and collect CPU, memory, and disk usage."""
     return await gather_resource_usage_targets(
         hosts=_hosts_from_strings(hosts),
         ssh_username=ssh_username,
+        ssh_key_path=ssh_key_path,
     )
 
 
 async def gather_resource_usage_targets(
     hosts: Sequence[HealthProbeTarget],
     ssh_username: str,
+    ssh_key_path: Path | None = None,
 ) -> list[NodeResources | SSHError]:
     """SSH to structured hosts and collect CPU, memory, and disk usage."""
     probe_results = await asyncio.gather(
-        *[_probe_host_resources(host, ssh_username=ssh_username)
-          for host in hosts],
+        *[
+            _probe_host_resources(
+                host,
+                ssh_username=ssh_username,
+                ssh_key_path=ssh_key_path,
+            )
+            for host in hosts
+        ],
         return_exceptions=True,
     )
     return _resource_results_from_gather(hosts, probe_results)
@@ -129,6 +152,7 @@ async def _probe_host_services(
     *,
     ssh_username: str,
     service_names: Sequence[str],
+    ssh_key_path: Path | None,
 ) -> list[ServiceStatus]:
     """Probe all configured services for one host in parallel."""
     service_outputs = await asyncio.gather(
@@ -137,6 +161,8 @@ async def _probe_host_services(
                 host,
                 ssh_username,
                 ("systemctl", "is-active", service_name),
+                allowed_returncodes=(3,),
+                ssh_key_path=ssh_key_path,
             )
             for service_name in service_names
         ]
@@ -159,6 +185,7 @@ async def _probe_host_resources(
     host: HealthProbeTarget,
     *,
     ssh_username: str,
+    ssh_key_path: Path | None,
 ) -> NodeResources:
     """Probe resource usage for one host."""
     output = await _run_ssh_command(
@@ -171,6 +198,7 @@ async def _probe_host_resources(
             "free | awk '/Mem:/ {print ($3/$2)*100}' && "
             "df -P / | awk 'NR==2 {gsub(/%/, \"\", $5); print $5}'",
         ),
+        ssh_key_path=ssh_key_path,
     )
     return _parse_resource_output(host, output)
 
@@ -179,6 +207,9 @@ async def _run_ssh_command(
     host: HealthProbeTarget,
     ssh_username: str,
     command: tuple[str, ...],
+    *,
+    allowed_returncodes: tuple[int, ...] = (),
+    ssh_key_path: Path | None = None,
 ) -> str:
     """Run one SSH command and return stdout or raise on transport failure."""
     try:
@@ -188,9 +219,10 @@ async def _run_ssh_command(
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=no",
+            *_SSH_HOST_KEY_OPTIONS,
         ]
+        if ssh_key_path is not None:
+            ssh_command.extend(["-i", str(ssh_key_path)])
         if host.jump_host:
             ssh_command.extend(["-J", f"{ssh_username}@{host.jump_host}"])
         ssh_command.extend([f"{ssh_username}@{host.address}", *command])
@@ -205,8 +237,13 @@ async def _run_ssh_command(
     stdout_bytes, stderr_bytes = await process.communicate()
     stdout = stdout_bytes.decode("utf-8")
     stderr = stderr_bytes.decode("utf-8").strip()
+    if _looks_like_ssh_auth_error(stderr):
+        raise SSHError(
+            stderr or f"SSH authentication failed for {host.address}")
     if process.returncode == 255 or _looks_like_ssh_transport_error(stderr):
         raise SSHError(stderr or f"Unable to reach node {host.address}")
+    if process.returncode != 0 and process.returncode not in allowed_returncodes:
+        raise SSHError(stderr or f"SSH command failed for {host.address}")
     return stdout
 
 
@@ -287,12 +324,16 @@ def _looks_like_ssh_transport_error(stderr: str) -> bool:
             "connection timed out",
             "operation timed out",
             "no route to host",
-            "permission denied",
             "connection closed",
             "closed by remote host",
             "connection reset",
         )
     )
+
+
+def _looks_like_ssh_auth_error(stderr: str) -> bool:
+    """Return whether stderr indicates an SSH authentication failure."""
+    return "permission denied" in stderr.lower()
 
 
 __all__ = [

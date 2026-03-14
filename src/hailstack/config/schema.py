@@ -87,6 +87,14 @@ class VolumeConfig(BaseModel):
     preserve_on_destroy: bool = False
     existing_volume_id: str = ""
 
+    @field_validator("size_gb")
+    @classmethod
+    def validate_size_gb(cls, value: int) -> int:
+        """Require positive sizes for managed Cinder volumes."""
+        if value < 1:
+            raise ValueError("volumes.size_gb must be at least 1")
+        return value
+
     @model_validator(mode="after")
     def validate_volume_source(self) -> Self:
         """Reject configs that request both a new and existing volume."""
@@ -105,6 +113,17 @@ class S3Config(BaseModel):
     endpoint: str = ""
     access_key: str = ""
     secret_key: str = ""
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> Self:
+        """Require credentials when a runtime S3 endpoint is configured."""
+        if self.endpoint.strip() and (
+            not self.access_key.strip() or not self.secret_key.strip()
+        ):
+            raise ValueError(
+                "s3.endpoint, s3.access_key, and s3.secret_key must all be set together"
+            )
+        return self
 
 
 class CephS3Config(BaseModel):
@@ -190,9 +209,11 @@ class ClusterSettings(BaseModel):
     worker_flavour: str = ""
     network_name: str = "cloudforms_network"
     lustre_network: str = ""
+    lustre_mount_target: str = "10.1.0.1@tcp:/fsx"
     ssh_username: str = "ubuntu"
     monitoring: Literal["netdata", "none"] = "netdata"
     floating_ip: str = ""
+    floating_ip_pool: str = ""
 
     @field_validator("name")
     @classmethod
@@ -202,6 +223,24 @@ class ClusterSettings(BaseModel):
             raise ValueError(
                 "Invalid cluster name: must match ^[a-z][a-z0-9-]{1,62}$")
         return value
+
+    @field_validator("ssh_username")
+    @classmethod
+    def validate_ssh_username(cls, value: str) -> str:
+        """Require a non-empty SSH username for lifecycle commands."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ssh_username cannot be empty")
+        return stripped
+
+    @field_validator("lustre_mount_target")
+    @classmethod
+    def validate_lustre_mount_target(cls, value: str) -> str:
+        """Require a non-empty Lustre mount target when provided."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("lustre_mount_target cannot be empty")
+        return stripped
 
     @field_validator("monitoring", mode="before")
     @classmethod
@@ -255,13 +294,26 @@ class ClusterConfig(BaseModel):
     extras: ExtrasConfig = Field(default_factory=ExtrasConfig)
     packer: PackerConfig | None = None
 
-    def validate_for_command(self, command: str) -> Self:
+    def validate_for_command(
+        self,
+        command: str,
+        *,
+        require_backend: bool = True,
+    ) -> Self:
         """Apply command-specific validation rules after parsing."""
         if command == "build-image" and self.packer is None:
             raise ConfigError("packer.base_image required")
 
-        if command == "create" and not self.ceph_s3.has_required_credentials():
-            raise ConfigError("ceph_s3 credentials required")
+        if (
+            command == "create"
+            and require_backend
+            and not self.ceph_s3.has_required_credentials()
+        ):
+            raise ConfigError(
+                "Ceph S3 credentials required for Pulumi state backend")
+
+        if command == "create" and not self.ssh_keys.public_keys:
+            raise ConfigError("ssh_keys.public_keys required")
 
         return self
 

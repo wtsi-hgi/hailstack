@@ -26,9 +26,6 @@
 import hashlib
 import json
 import logging
-import os
-import re
-import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -49,7 +46,7 @@ from hailstack.ansible.runner import (
 from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.errors import ConfigError, PulumiError
-from hailstack.pulumi.stack import REPOSITORY_ROOT, AutomationStackRunner
+from hailstack.pulumi.stack import AutomationStackRunner
 from hailstack.storage.rollout import (
     NodeResult as StoredNodeResult,
 )
@@ -62,14 +59,7 @@ from hailstack.storage.rollout import (
 
 type PackageFileValue = str | list[str] | dict[str, "PackageFileValue"]
 
-_PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+")
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
-_PACKAGE_IMPORT_NAME_ALIASES = {
-    "pyyaml": "yaml",
-    "python-dateutil": "dateutil",
-    "scikit-image": "skimage",
-    "scikit-learn": "sklearn",
-}
 
 
 @dataclass(frozen=True)
@@ -194,39 +184,7 @@ class PulumiInstallStackRunner:
     def get_install_outputs(self, config: ClusterConfig) -> Mapping[str, object]:
         """Return JSON stack outputs for the configured cluster."""
         self._automation_runner.check_backend_access(config)
-        try:
-            result = subprocess.run(
-                [
-                    "pulumi",
-                    "stack",
-                    "output",
-                    "--json",
-                    "--stack",
-                    f"hailstack-{config.cluster.name}",
-                ],
-                capture_output=True,
-                check=False,
-                cwd=REPOSITORY_ROOT,
-                env=_pulumi_env(config),
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise PulumiError("Pulumi CLI not found") from error
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            raise PulumiError(f"Unable to read Pulumi stack outputs: {detail}")
-
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise PulumiError(
-                "Pulumi stack output was not valid JSON") from error
-
-        if not isinstance(payload, dict):
-            raise PulumiError("Pulumi stack output must be a JSON object")
-
-        return cast(Mapping[str, object], payload)
+        return self._automation_runner.current_stack_outputs(config)
 
 
 class AnsibleInstallExecutor:
@@ -336,14 +294,6 @@ def create_install_executor(logger: logging.Logger) -> InstallExecutor:
 def create_rollout_recorder(logger: logging.Logger) -> RolloutRecorder:
     """Create the default rollout recorder for the command."""
     return S3RolloutRecorder(logger)
-
-
-def _pulumi_env(config: ClusterConfig) -> dict[str, str]:
-    """Build the environment required for Pulumi backend access."""
-    env = dict(os.environ)
-    env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
-    env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
-    return env
 
 
 def _ensure_ceph_s3_credentials(config: ClusterConfig) -> None:
@@ -503,18 +453,6 @@ def _require_output_str_list(outputs: Mapping[str, object], key: str) -> list[st
     return strings
 
 
-def _package_import_name(package: str) -> str:
-    """Return the base import name for a Python package specifier."""
-    match = _PACKAGE_NAME_PATTERN.match(package.strip())
-    if match is None:
-        return package.strip()
-    distribution_name = match.group(0)
-    alias = _PACKAGE_IMPORT_NAME_ALIASES.get(distribution_name.lower())
-    if alias is not None:
-        return alias
-    return distribution_name.replace("-", "_").replace(".", "_")
-
-
 def _required_verification_status(
     requested_packages: Sequence[str],
     reported_status: Mapping[str, bool],
@@ -531,11 +469,7 @@ def _required_import_status(
 ) -> dict[str, bool]:
     """Require explicit import verification for every requested Python package."""
     return {
-        _package_import_name(package): reported_status.get(
-            _package_import_name(package),
-            False,
-        )
-        for package in requested_packages
+        package: reported_status.get(package, False) for package in requested_packages
     }
 
 

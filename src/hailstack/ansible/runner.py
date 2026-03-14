@@ -32,9 +32,14 @@ from tempfile import TemporaryDirectory
 from typing import cast
 
 from hailstack.errors import AnsibleError
-from hailstack.pulumi.stack import REPOSITORY_ROOT
+from hailstack.runtime_paths import INSTALL_PLAYBOOK_PATH, runtime_work_dir
 
-PLAYBOOK_PATH = REPOSITORY_ROOT / "ansible" / "install.yml"
+PLAYBOOK_PATH = INSTALL_PLAYBOOK_PATH
+_SSH_COMMON_ARGS = (
+    "-o StrictHostKeyChecking=no "
+    "-o UserKnownHostsFile=/dev/null "
+    "-o GlobalKnownHostsFile=/dev/null"
+)
 DEFAULT_BASE_VENV_PATH = "/opt/hailstack/base-venv"
 DEFAULT_OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
 DEFAULT_SOFTWARE_STATE_PATH = "/var/lib/hailstack/software-state.json"
@@ -151,11 +156,11 @@ def _write_inventory_file(
             host_vars = {
                 "ansible_host": hostname,
                 "ansible_user": ssh_username,
+                "ansible_ssh_common_args": _SSH_COMMON_ARGS,
             }
             if group_name == "worker" and worker_jump_host is not None:
                 host_vars["ansible_ssh_common_args"] = (
-                    f"-o ProxyJump={ssh_username}@{worker_jump_host} "
-                    "-o StrictHostKeyChecking=no"
+                    f"-o ProxyJump={ssh_username}@{worker_jump_host} {_SSH_COMMON_ARGS}"
                 )
             hosts[hostname] = host_vars
             group_entries[hostname] = host_vars
@@ -198,7 +203,7 @@ def _run_playbook_command(command: Sequence[str]) -> subprocess.CompletedProcess
             list(command),
             capture_output=True,
             check=False,
-            cwd=REPOSITORY_ROOT,
+            cwd=runtime_work_dir(),
             text=True,
         )
     except FileNotFoundError as error:

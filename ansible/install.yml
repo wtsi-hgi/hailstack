@@ -9,27 +9,54 @@
     python_packages: []
     hailstack_base_python_packages:
       - hail
+    hailstack_python_import_aliases:
+      pyyaml: yaml
+      python-dateutil: dateutil
+      scikit-image: skimage
+      scikit-learn: sklearn
     smoke_test: null
     overlay_venv_path: /opt/hailstack/overlay-venv
     software_state_path: /var/lib/hailstack/software-state.json
     hailstack_result_path: /tmp/hailstack-results.jsonl
     hailstack_import_check_script: |
       import importlib
+      import re
       import sys
+      from importlib.metadata import PackageNotFoundError, distribution
       from pip._vendor.packaging.requirements import Requirement
 
       requirement = Requirement(sys.argv[1])
-      aliases = {
-        "pyyaml": "yaml",
-        "python-dateutil": "dateutil",
-        "scikit-image": "skimage",
-        "scikit-learn": "sklearn",
-      }
-      import_name = aliases.get(
-        requirement.name.lower(),
-        requirement.name.replace("-", "_").replace(".", "_"),
-      )
-      importlib.import_module(import_name)
+      aliases = {{ hailstack_python_import_aliases | to_json }}
+      distribution_name = re.sub(r"[-_.]+", "-", requirement.name.lower())
+
+      candidates = []
+      try:
+        top_level = distribution(requirement.name).read_text("top_level.txt")
+      except PackageNotFoundError:
+        top_level = None
+
+      if top_level:
+        candidates.extend(
+          line.strip() for line in top_level.splitlines() if line.strip()
+        )
+
+      alias = aliases.get(distribution_name)
+      if alias is not None:
+        candidates.append(alias)
+      candidates.append(distribution_name.replace("-", "_"))
+
+      seen = set()
+      for import_name in candidates:
+        if import_name in seen:
+          continue
+        seen.add(import_name)
+        try:
+          importlib.import_module(import_name)
+          break
+        except ImportError:
+          continue
+      else:
+        raise SystemExit(1)
     hailstack_version_check_script: |
       import sys
       from importlib.metadata import PackageNotFoundError, version
@@ -124,8 +151,67 @@
       register: hailstack_python_install
       ignore_errors: true
 
+    - name: Ensure Spark uses overlay Python for PySpark
+      ansible.builtin.lineinfile:
+        path: /etc/spark/conf/spark-defaults.conf
+        regexp: '^spark\.pyspark\.python\s+'
+        line: "spark.pyspark.python {{ overlay_venv_path }}/bin/python"
+      when: python_packages | length > 0
+      register: hailstack_spark_overlay_python
+      ignore_errors: true
+
+    - name: Ensure JupyterLab service uses overlay Python
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/jupyter-lab.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Hailstack JupyterLab
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStart={{ overlay_venv_path }}/bin/python -m jupyterlab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      when: python_packages | length > 0
+      register: hailstack_jupyter_overlay_python
+      ignore_errors: true
+
+    - name: Disable legacy Hailstack JupyterLab service
+      ansible.builtin.systemd_service:
+        name: hailstack-jupyterlab
+        daemon_reload: true
+        enabled: false
+        state: stopped
+      when:
+        - python_packages | length > 0
+        - "'master' in group_names"
+      register: hailstack_legacy_jupyter_disable
+      ignore_errors: true
+
+    - name: Restart JupyterLab after overlay Python update
+      ansible.builtin.systemd_service:
+        name: jupyter-lab
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      when:
+        - python_packages | length > 0
+        - "'master' in group_names"
+      register: hailstack_jupyter_restart
+      ignore_errors: true
+
     - name: Run optional smoke test
-      ansible.builtin.shell: "{{ smoke_test }}"
+      ansible.builtin.shell: >-
+        {% if python_packages | length > 0 %}
+        . "{{ overlay_venv_path }}/bin/activate" && {{ smoke_test }}
+        {% else %}
+        {{ smoke_test }}
+        {% endif %}
       when: smoke_test is not none
       failed_when: false
       changed_when: false
@@ -226,7 +312,7 @@
         hailstack_python_status: >-
           {% set verification = {} %}
           {% for package in python_packages %}
-          {% set distribution_name = package | regex_replace('([<>=!~].*)$', '') | lower | regex_replace('[-_.]+', '-') %}
+          {% set distribution_name = package | regex_replace(';.*$', '') | regex_replace('\[.*\]', '') | regex_replace('([<>=!~].*)$', '') | regex_replace('\s+', '') | lower | regex_replace('[-_.]+', '-') %}
           {% set _ = verification.update({package: (distribution_name in hailstack_python_versions)}) %}
           {% endfor %}
           {{ verification }}
@@ -245,8 +331,7 @@
         hailstack_import_status: >-
           {% set verification = {} %}
           {% for result in hailstack_import_verification.results | default([]) %}
-          {% set import_name = result.item | regex_replace('([<>=!~].*)$', '') | replace('-', '_') | replace('.', '_') %}
-          {% set _ = verification.update({import_name: (result.rc == 0)}) %}
+          {% set _ = verification.update({result.item: (result.rc == 0)}) %}
           {% endfor %}
           {{ verification }}
 
@@ -255,8 +340,7 @@
         hailstack_base_import_status: >-
           {% set verification = {} %}
           {% for result in hailstack_base_import_verification.results | default([]) %}
-          {% set import_name = result.item | regex_replace('([<>=!~].*)$', '') | replace('-', '_') | replace('.', '_') %}
-          {% set _ = verification.update({import_name: (result.rc == 0)}) %}
+          {% set _ = verification.update({result.item: (result.rc == 0)}) %}
           {% endfor %}
           {{ verification }}
 
@@ -293,6 +377,9 @@
             (hailstack_overlay_venv_create is not defined or not (hailstack_overlay_venv_create.failed | default(false))) and
             (hailstack_overlay_base_path is not defined or not (hailstack_overlay_base_path.failed | default(false))) and
             (hailstack_python_install is not defined or not (hailstack_python_install.failed | default(false))) and
+            (hailstack_spark_overlay_python is not defined or not (hailstack_spark_overlay_python.failed | default(false))) and
+            (hailstack_jupyter_overlay_python is not defined or not (hailstack_jupyter_overlay_python.failed | default(false))) and
+            (hailstack_jupyter_restart is not defined or not (hailstack_jupyter_restart.failed | default(false))) and
             (false not in (hailstack_system_status | default({})).values() | list) and
             (false not in (hailstack_python_status | default({})).values() | list) and
             (false not in (hailstack_base_import_status | default({})).values() | list) and
@@ -309,6 +396,9 @@
             + ([hailstack_overlay_venv_create.msg | default('overlay virtual environment creation failed')] if hailstack_overlay_venv_create is defined and (hailstack_overlay_venv_create.failed | default(false)) else [])
             + ([hailstack_overlay_base_path.msg | default('overlay base path configuration failed')] if hailstack_overlay_base_path is defined and (hailstack_overlay_base_path.failed | default(false)) else [])
             + ([hailstack_python_install.msg | default('python package install failed')] if hailstack_python_install is defined and (hailstack_python_install.failed | default(false)) else [])
+            + ([hailstack_spark_overlay_python.msg | default('spark overlay runtime configuration failed')] if hailstack_spark_overlay_python is defined and (hailstack_spark_overlay_python.failed | default(false)) else [])
+            + ([hailstack_jupyter_overlay_python.msg | default('jupyter overlay runtime configuration failed')] if hailstack_jupyter_overlay_python is defined and (hailstack_jupyter_overlay_python.failed | default(false)) else [])
+            + ([hailstack_jupyter_restart.msg | default('jupyter restart failed')] if hailstack_jupyter_restart is defined and (hailstack_jupyter_restart.failed | default(false)) else [])
             + (['smoke test failed'] if hailstack_smoke_test is defined and hailstack_smoke_test.rc != 0 else [])
             + (['software state update failed'] if hailstack_software_state_write.failed | default(false) else [])
             + ((hailstack_system_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'system package verification failed: \\1') | list)
@@ -330,7 +420,10 @@
             (hailstack_system_install is defined and hailstack_system_install.changed) or
             (hailstack_overlay_venv_create is defined and hailstack_overlay_venv_create.changed) or
             (hailstack_overlay_base_path is defined and hailstack_overlay_base_path.changed) or
-            (hailstack_python_install is defined and hailstack_python_install.changed)
+            (hailstack_python_install is defined and hailstack_python_install.changed) or
+            (hailstack_spark_overlay_python is defined and hailstack_spark_overlay_python.changed) or
+            (hailstack_jupyter_overlay_python is defined and hailstack_jupyter_overlay_python.changed) or
+            (hailstack_jupyter_restart is defined and hailstack_jupyter_restart.changed)
           )
         } | to_json }}"
       delegate_to: localhost

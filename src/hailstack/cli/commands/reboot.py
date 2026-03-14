@@ -23,9 +23,7 @@
 
 """Reboot worker nodes in an existing cluster."""
 
-import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -39,15 +37,24 @@ import typer
 from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.errors import PulumiError, SSHError
-from hailstack.pulumi.stack import REPOSITORY_ROOT, AutomationStackRunner
+from hailstack.pulumi.stack import AutomationStackRunner
 
-type RebootRequester = Callable[["RebootTarget", str], None]
-type ConnectivityChecker = Callable[["RebootTarget", str], bool]
+type RebootRequester = Callable[["RebootTarget", str, Path | None], None]
+type ConnectivityChecker = Callable[["RebootTarget", str, Path | None], bool]
+type BootMarkerReader = Callable[["RebootTarget", str, Path | None], str]
 type Sleeper = Callable[[float], None]
 type Clock = Callable[[], float]
 
 _REBOOT_TIMEOUT_SECONDS = 300.0
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_SSH_HOST_KEY_OPTIONS = (
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "GlobalKnownHostsFile=/dev/null",
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,7 @@ class RebootExecutor(Protocol):
         inventory: Sequence[RebootTarget],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None = None,
         timeout_seconds: float,
         backoff_seconds: Sequence[float],
     ) -> None:
@@ -93,39 +101,7 @@ class PulumiRebootStackRunner:
     def get_reboot_outputs(self, config: ClusterConfig) -> Mapping[str, object]:
         """Return JSON stack outputs for the configured cluster."""
         self._automation_runner.check_backend_access(config)
-        try:
-            result = subprocess.run(
-                [
-                    "pulumi",
-                    "stack",
-                    "output",
-                    "--json",
-                    "--stack",
-                    f"hailstack-{config.cluster.name}",
-                ],
-                capture_output=True,
-                check=False,
-                cwd=REPOSITORY_ROOT,
-                env=_pulumi_env(config),
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise PulumiError("Pulumi CLI not found") from error
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            raise PulumiError(f"Unable to read Pulumi stack outputs: {detail}")
-
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise PulumiError(
-                "Pulumi stack output was not valid JSON") from error
-
-        if not isinstance(payload, dict):
-            raise PulumiError("Pulumi stack output must be a JSON object")
-
-        return cast(Mapping[str, object], payload)
+        return self._automation_runner.current_stack_outputs(config)
 
 
 class SSHRebootExecutor:
@@ -137,6 +113,7 @@ class SSHRebootExecutor:
         logger: logging.Logger,
         reboot_requester: RebootRequester | None = None,
         connectivity_checker: ConnectivityChecker | None = None,
+        boot_marker_reader: BootMarkerReader | None = None,
         sleeper: Sleeper = sleep,
         clock: Clock = monotonic,
     ) -> None:
@@ -144,6 +121,7 @@ class SSHRebootExecutor:
         self._logger = logger
         self._reboot_requester = reboot_requester or self._request_reboot
         self._connectivity_checker = connectivity_checker or self._check_connectivity
+        self._boot_marker_reader = boot_marker_reader or self._read_boot_marker
         self._sleeper = sleeper
         self._clock = clock
 
@@ -152,16 +130,24 @@ class SSHRebootExecutor:
         inventory: Sequence[RebootTarget],
         *,
         ssh_username: str,
+        ssh_key_path: Path | None = None,
         timeout_seconds: float,
         backoff_seconds: Sequence[float],
     ) -> None:
         """Reboot each target and verify SSH returns before the timeout."""
         for target in inventory:
             self._logger.info("Rebooting %s", target.name)
-            self._reboot_requester(target, ssh_username)
+            initial_boot_marker = self._boot_marker_reader(
+                target,
+                ssh_username,
+                ssh_key_path,
+            )
+            self._reboot_requester(target, ssh_username, ssh_key_path)
             self._wait_for_recovery(
                 target,
+                initial_boot_marker=initial_boot_marker,
                 ssh_username=ssh_username,
+                ssh_key_path=ssh_key_path,
                 timeout_seconds=timeout_seconds,
                 backoff_seconds=backoff_seconds,
             )
@@ -170,21 +156,52 @@ class SSHRebootExecutor:
         self,
         target: RebootTarget,
         *,
+        initial_boot_marker: str,
         ssh_username: str,
+        ssh_key_path: Path | None,
         timeout_seconds: float,
         backoff_seconds: Sequence[float],
     ) -> None:
-        """Wait until a node disconnects and later accepts SSH again."""
+        """Wait until a node exposes a new boot marker after reboot."""
         deadline = self._clock() + timeout_seconds
         saw_disconnect = False
         attempt = 0
 
         while self._clock() < deadline:
-            if self._connectivity_checker(target, ssh_username):
+            if self._connectivity_checker(target, ssh_username, ssh_key_path):
+                try:
+                    current_boot_marker = self._boot_marker_reader(
+                        target,
+                        ssh_username,
+                        ssh_key_path,
+                    )
+                except SSHError as error:
+                    if not _looks_like_ssh_transport_error(str(error)):
+                        raise
+                    saw_disconnect = True
+                    current_boot_marker = None
+                if (
+                    current_boot_marker is not None
+                    and current_boot_marker != initial_boot_marker
+                ):
+                    if saw_disconnect:
+                        self._logger.info(
+                            "SSH connectivity restored for %s",
+                            target.name,
+                        )
+                    else:
+                        self._logger.info(
+                            "Observed reboot completion for %s without an "
+                            "SSH disconnect window",
+                            target.name,
+                        )
+                    return
                 if saw_disconnect:
                     self._logger.info(
-                        "SSH connectivity restored for %s", target.name)
-                    return
+                        "SSH connectivity returned for %s but reboot has not "
+                        "completed yet",
+                        target.name,
+                    )
             else:
                 saw_disconnect = True
 
@@ -200,9 +217,14 @@ class SSHRebootExecutor:
             f"{target.name} within {int(timeout_seconds)} seconds"
         )
 
-    def _request_reboot(self, target: RebootTarget, ssh_username: str) -> None:
+    def _request_reboot(
+        self,
+        target: RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None,
+    ) -> None:
         """Request an asynchronous reboot on one target node."""
-        self._run_ssh_command(
+        dispatched = self._run_ssh_command(
             target,
             ssh_username,
             (
@@ -212,20 +234,64 @@ class SSHRebootExecutor:
                 "nohup reboot >/dev/null 2>&1 &",
             ),
             treat_transport_error_as_unreachable=True,
+            allow_remote_close_as_success=True,
+            ssh_key_path=ssh_key_path,
+        )
+        if not dispatched:
+            raise SSHError(f"Failed to dispatch reboot to {target.name}")
+
+    def _check_connectivity(
+        self,
+        target: RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None,
+    ) -> bool:
+        """Return whether a node currently accepts SSH connections."""
+        return self._run_ssh_command(
+            target,
+            ssh_username,
+            ("true",),
+            treat_transport_error_as_unreachable=True,
+            ssh_key_path=ssh_key_path,
         )
 
-    def _check_connectivity(self, target: RebootTarget, ssh_username: str) -> bool:
-        """Return whether a node currently accepts SSH connections."""
-        try:
-            self._run_ssh_command(
-                target,
-                ssh_username,
-                ("true",),
-                treat_transport_error_as_unreachable=True,
-            )
-        except SSHError:
-            return False
-        return True
+    def _read_boot_marker(
+        self,
+        target: RebootTarget,
+        ssh_username: str,
+        ssh_key_path: Path | None,
+    ) -> str:
+        """Read the node boot ID so reboot completion can be confirmed."""
+        boot_marker = self._run_ssh_command_for_output(
+            target,
+            ssh_username,
+            ("cat", "/proc/sys/kernel/random/boot_id"),
+            ssh_key_path=ssh_key_path,
+        )
+        stripped_marker = boot_marker.strip()
+        if not stripped_marker:
+            raise SSHError(f"Unable to read boot marker for {target.name}")
+        return stripped_marker
+
+    def _run_ssh_command_for_output(
+        self,
+        target: RebootTarget,
+        ssh_username: str,
+        command: tuple[str, ...],
+        *,
+        ssh_key_path: Path | None,
+    ) -> str:
+        """Run one SSH command and return stdout or raise on failure."""
+        result = self._run_ssh_subprocess(
+            target,
+            ssh_username,
+            command,
+            ssh_key_path=ssh_key_path,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise SSHError(stderr or f"SSH command failed for {target.name}")
+        return result.stdout
 
     def _run_ssh_command(
         self,
@@ -234,31 +300,17 @@ class SSHRebootExecutor:
         command: tuple[str, ...],
         *,
         treat_transport_error_as_unreachable: bool,
+        allow_remote_close_as_success: bool = False,
+        ssh_key_path: Path | None = None,
     ) -> bool:
         """Run one SSH command and either raise or report transport failures."""
         try:
-            ssh_command = [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "StrictHostKeyChecking=no",
-            ]
-            if target.jump_host:
-                ssh_command.extend(
-                    ["-J", f"{ssh_username}@{target.jump_host}"])
-            ssh_command.extend([f"{ssh_username}@{target.host}", *command])
-            result = subprocess.run(
-                ssh_command,
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
+            result = self._run_ssh_subprocess(
+                target,
+                ssh_username,
+                command,
+                ssh_key_path=ssh_key_path,
             )
-        except FileNotFoundError as error:
-            raise SSHError("SSH CLI not found") from error
         except subprocess.TimeoutExpired:
             if treat_transport_error_as_unreachable:
                 return False
@@ -268,11 +320,47 @@ class SSHRebootExecutor:
         stderr = result.stderr.strip()
         if result.returncode == 0:
             return True
+        if allow_remote_close_as_success and _looks_like_reboot_disconnect(stderr):
+            return True
         if treat_transport_error_as_unreachable and _looks_like_ssh_transport_error(
             stderr
         ):
             return False
         raise SSHError(stderr or f"SSH command failed for {target.name}")
+
+    def _run_ssh_subprocess(
+        self,
+        target: RebootTarget,
+        ssh_username: str,
+        command: tuple[str, ...],
+        *,
+        ssh_key_path: Path | None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run an SSH subprocess with shared transport settings."""
+        try:
+            ssh_command = [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                *_SSH_HOST_KEY_OPTIONS,
+            ]
+            if ssh_key_path is not None:
+                ssh_command.extend(["-i", str(ssh_key_path)])
+            if target.jump_host:
+                ssh_command.extend(
+                    ["-J", f"{ssh_username}@{target.jump_host}"])
+            ssh_command.extend([f"{ssh_username}@{target.host}", *command])
+            return subprocess.run(
+                ssh_command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        except FileNotFoundError as error:
+            raise SSHError("SSH CLI not found") from error
 
 
 def get_reboot_logger() -> logging.Logger:
@@ -300,6 +388,7 @@ def create_reboot_executor(logger: logging.Logger) -> RebootExecutor:
 def reboot_command(
     config: Annotated[str, typer.Option("--config")] = "./hailstack.toml",
     node: Annotated[str | None, typer.Option("--node")] = None,
+    ssh_key: Annotated[str | None, typer.Option("--ssh-key")] = None,
     dotenv: Annotated[str | None, typer.Option("--dotenv")] = None,
 ) -> None:
     """Reboot worker nodes."""
@@ -320,17 +409,10 @@ def reboot_command(
     executor.reboot_nodes(
         targets,
         ssh_username=loaded_config.cluster.ssh_username,
+        ssh_key_path=Path(ssh_key) if ssh_key is not None else None,
         timeout_seconds=_REBOOT_TIMEOUT_SECONDS,
         backoff_seconds=_RETRY_BACKOFF_SECONDS,
     )
-
-
-def _pulumi_env(config: ClusterConfig) -> dict[str, str]:
-    """Build the environment required for Pulumi backend access."""
-    env = dict(os.environ)
-    env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
-    env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
-    return env
 
 
 def _resolve_inventory(
@@ -484,7 +566,19 @@ def _looks_like_ssh_transport_error(stderr: str) -> bool:
             "connection timed out",
             "operation timed out",
             "no route to host",
-            "permission denied",
+            "connection closed",
+            "closed by remote host",
+            "connection reset",
+        )
+    )
+
+
+def _looks_like_reboot_disconnect(stderr: str) -> bool:
+    """Return whether stderr matches the expected reboot dispatch disconnect."""
+    lowered = stderr.lower()
+    return any(
+        fragment in lowered
+        for fragment in (
             "connection closed",
             "closed by remote host",
             "connection reset",

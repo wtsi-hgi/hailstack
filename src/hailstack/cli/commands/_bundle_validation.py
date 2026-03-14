@@ -28,8 +28,9 @@ from pathlib import Path
 from hailstack.config.compatibility import Bundle, CompatibilityMatrix
 from hailstack.config.parser import load_config
 from hailstack.config.validator import validate_bundle_for_command
+from hailstack.runtime_paths import BUNDLES_TOML_PATH
 
-DEFAULT_COMPATIBILITY_MATRIX_PATH = Path(__file__).resolve().parents[4] / "bundles.toml"
+DEFAULT_COMPATIBILITY_MATRIX_PATH = BUNDLES_TOML_PATH
 
 
 def validate_command_config_bundle(

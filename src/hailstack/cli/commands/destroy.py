@@ -73,8 +73,7 @@ def create_pulumi_destroy_runner(logger: logging.Logger) -> PulumiDestroyRunner:
 def _ensure_ceph_s3_credentials(config: ClusterConfig) -> None:
     """Require Ceph S3 credentials before touching Pulumi state."""
     if not config.ceph_s3.has_required_credentials():
-        raise ConfigError(
-            "Ceph S3 credentials required for Pulumi state backend")
+        raise ConfigError("Ceph S3 credentials required for Pulumi state backend")
 
 
 def _confirm_destroy(cluster_name: str) -> bool:
@@ -93,8 +92,7 @@ def _confirm_destroy(cluster_name: str) -> bool:
 def destroy_command(
     config: Annotated[
         Path,
-        typer.Option(
-            "--config", help="Path to cluster configuration TOML file."),
+        typer.Option("--config", help="Path to cluster configuration TOML file."),
     ],
     dry_run: Annotated[
         bool,

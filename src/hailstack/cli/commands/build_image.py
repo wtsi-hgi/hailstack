@@ -38,8 +38,9 @@ from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.config.validator import validate_bundle
 from hailstack.packer.builder import build_image
+from hailstack.runtime_paths import BUNDLES_TOML_PATH
 
-DEFAULT_COMPATIBILITY_MATRIX_PATH = Path(__file__).resolve().parents[4] / "bundles.toml"
+DEFAULT_COMPATIBILITY_MATRIX_PATH = BUNDLES_TOML_PATH
 
 
 def get_build_logger() -> logging.Logger:
@@ -79,7 +80,8 @@ def validate_command_config_bundle(
 def build_image_cmd(
     config: Annotated[
         Path,
-        typer.Option("--config", help="Path to cluster configuration TOML file."),
+        typer.Option(
+            "--config", help="Path to cluster configuration TOML file."),
     ] = Path("./hailstack.toml"),
     bundle: Annotated[
         str | None,

@@ -153,6 +153,11 @@ class FakeOpenStackClient:
         del volume_id
         return True
 
+    def volume_is_available(self, volume_id: str) -> bool:
+        """Report whether a referenced volume can be attached."""
+        del volume_id
+        return True
+
     def get_compute_quota(self) -> ComputeQuota:
         """Return available compute quota."""
         return self.compute_quota
@@ -234,6 +239,7 @@ class FakeAutoStack:
         self._stack_name = stack_name
         self._program = program
         self.created_snapshot: ProgramSnapshot | None = None
+        self.workspace = environment
 
     def set_program(self, program: Callable[[], None]) -> None:
         """Update the currently selected Pulumi program for this stack."""
@@ -260,8 +266,23 @@ class FakeAutoStack:
             on_output(stdout)
         return FakePreviewResult(stdout=stdout)
 
+    def preview_destroy(
+        self,
+        on_output: Callable[[str], None] | None = None,
+    ) -> FakePreviewResult:
+        """Render a destroy preview from the currently created mocked state."""
+        destroy_count = 0
+        if self.created_snapshot is not None:
+            destroy_count = len(self.created_snapshot.resources)
+        stdout = f"Previewing destroy\nResources:\n  - {destroy_count} to delete\n"
+        if on_output is not None:
+            on_output(stdout)
+        return FakePreviewResult(stdout=stdout)
+
     def up(self, on_output: Callable[[str], None] | None = None) -> FakeUpResult:
         """Run the current Pulumi program and persist the created stack state."""
+        if self._stack_name in self._environment.fail_up_for_stacks:
+            raise RuntimeError(f"update failed for {self._stack_name}")
         snapshot = self._environment.run_program(self._program)
         self.created_snapshot = snapshot
         stdout = (
@@ -296,6 +317,7 @@ class FakeAutomationEnvironment:
     def __init__(self) -> None:
         """Initialise fake automation stack storage."""
         self.stacks: dict[str, FakeAutoStack] = {}
+        self.fail_up_for_stacks: set[str] = set()
         self.removed_stacks: set[str] = set()
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,6 +337,20 @@ class FakeAutomationEnvironment:
                 self.stacks[stack_name] = stack
             else:
                 stack.set_program(program)
+            return stack
+
+        def fake_create_stack(
+            *,
+            stack_name: str,
+            project_name: str,
+            program: Callable[[], None],
+            opts: object,
+        ) -> FakeAutoStack:
+            del project_name, opts
+            if stack_name in self.stacks:
+                raise RuntimeError(f"stack {stack_name} already exists")
+            stack = FakeAutoStack(self, stack_name, program)
+            self.stacks[stack_name] = stack
             return stack
 
         def fake_select_stack(
@@ -346,6 +382,11 @@ class FakeAutomationEnvironment:
             stack_module.auto,
             "create_or_select_stack",
             fake_create_or_select_stack,
+        )
+        monkeypatch.setattr(
+            stack_module.auto,
+            "create_stack",
+            fake_create_stack,
         )
         monkeypatch.setattr(
             stack_module.auto,
@@ -399,6 +440,11 @@ class FakeAutomationEnvironment:
         stack = self.stacks[stack_name]
         assert stack.created_snapshot is not None
         return stack.created_snapshot
+
+    def remove_stack(self, stack_name: str) -> None:
+        """Remove a stack from the fake backend."""
+        self.stacks.pop(stack_name, None)
+        self.removed_stacks.add(stack_name)
 
 
 def _resolve_output(
@@ -515,7 +561,26 @@ def test_create_dry_run_reports_expected_resource_count(
         "Resources:\n"
         f"  + {EXPECTED_CREATE_RESOURCE_COUNT} to create\n"
     )
+    assert not environment.has_stack("hailstack-test-cluster")
+
+
+def test_create_failed_update_keeps_existing_stack(
+    lifecycle_environment: tuple[Path, FakeAutomationEnvironment],
+) -> None:
+    """Do not destroy an existing stack when a subsequent update fails."""
+    config_path, environment = lifecycle_environment
+
+    create_result = runner.invoke(
+        app, ["create", "--config", str(config_path)])
+    assert create_result.exit_code == 0
+    original_snapshot = environment.snapshot("hailstack-test-cluster")
+
+    environment.fail_up_for_stacks.add("hailstack-test-cluster")
+    retry_result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert retry_result.exit_code == 1
     assert environment.has_stack("hailstack-test-cluster")
+    assert environment.snapshot("hailstack-test-cluster") == original_snapshot
 
 
 def test_create_apply_exports_expected_stack_outputs(
@@ -532,7 +597,12 @@ def test_create_apply_exports_expected_stack_outputs(
         "bundle_id": "hail-0.2.137-gnomad-3.0.4-r2",
         "cluster_name": "test-cluster",
         "master_private_ip": "10.0.0.10",
+        "master_flavour": "m2.2xlarge",
         "master_public_ip": "203.0.113.10",
+        "managed_volume_size_gb": 0,
+        "monitoring_enabled": True,
+        "num_workers": 2,
+        "worker_flavour": "m2.xlarge",
         "worker_names": ["test-cluster-worker-01", "test-cluster-worker-02"],
         "worker_private_ips": ["10.0.0.11", "10.0.0.12"],
     }

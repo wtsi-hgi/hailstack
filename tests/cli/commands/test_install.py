@@ -236,11 +236,6 @@ def _distribution_version(requirement: str) -> str:
     raise AssertionError(f"No satisfying test version found for {requirement}")
 
 
-def _import_name(requirement: str) -> str:
-    """Return the import name derived from a package requirement."""
-    return install_module._package_import_name(Requirement(requirement).name)
-
-
 def _installed_python_versions(packages: Sequence[str]) -> dict[str, str]:
     """Return installed Python versions keyed by normalized distribution name."""
     return {
@@ -284,7 +279,7 @@ def _verification_payload(
         for package in requested_python_packages
     }
     import_status = {
-        _import_name(package): _distribution_name(package) in installed_python_versions
+        package: _distribution_name(package) in installed_python_versions
         for package in requested_python_packages
     }
     return {
@@ -774,16 +769,48 @@ def test_install_routes_workers_via_master_proxyjump(
     ]["hosts"]
     assert all(
         host_vars["ansible_ssh_common_args"]
-        == "-o ProxyJump=ubuntu@198.51.100.10 -o StrictHostKeyChecking=no"
+        == "-o ProxyJump=ubuntu@198.51.100.10 -o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null"
         for host_vars in worker_hosts.values()
     )
 
 
-def test_package_import_name_uses_known_distribution_aliases() -> None:
-    """Map distributions with non-matching top-level modules to import names."""
-    assert install_module._package_import_name(
-        "scikit-learn>=1.5") == "sklearn"
-    assert install_module._package_import_name("PyYAML") == "yaml"
+def test_install_uses_non_persistent_host_key_options_for_master(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply the same non-persistent host-key handling to master installs."""
+    config_path = _write_config(tmp_path / "install.toml")
+    fake_playbook_runner = FakePlaybookRunner()
+    _install_fakes(monkeypatch, playbook_runner=fake_playbook_runner)
+
+    result = runner.invoke(
+        app,
+        ["install", "--config", str(config_path), "--system", "mc"],
+    )
+
+    assert result.exit_code == 0
+    master_hosts = fake_playbook_runner.calls[0]["inventory"]["all"]["children"][
+        "master"
+    ]["hosts"]
+    assert all(
+        host_vars["ansible_ssh_common_args"]
+        == "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "-o GlobalKnownHostsFile=/dev/null"
+        for host_vars in master_hosts.values()
+    )
+
+
+def test_required_import_status_reads_package_keyed_verification() -> None:
+    """Treat package-keyed import verification as success for requested packages."""
+    assert install_module._required_import_status(
+        ["beautifulsoup4", "scikit-learn>=1.5"],
+        {"beautifulsoup4": True, "scikit-learn>=1.5": True},
+    ) == {"beautifulsoup4": True, "scikit-learn>=1.5": True}
+    assert install_module._required_import_status(
+        ["pillow", "opencv-python"],
+        {"pillow": True, "opencv-python": True},
+    ) == {"pillow": True, "opencv-python": True}
 
 
 def test_install_missing_verification_metadata_marks_node_failed(

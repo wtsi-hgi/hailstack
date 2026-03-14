@@ -36,7 +36,22 @@ ExecStop=/opt/spark/sbin/stop-worker.sh
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/spark-history-server.service <<'EOF'
+[Unit]
+Description=Spark History Server
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/opt/spark/sbin/start-history-server.sh
+ExecStop=/opt/spark/sbin/stop-history-server.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 test -f /etc/systemd/system/spark-master.service
 test -f /etc/systemd/system/spark-worker.service
+test -f /etc/systemd/system/spark-history-server.service
 /opt/spark/bin/spark-shell --version 2>&1 | grep -F "$SPARK_VERSION"

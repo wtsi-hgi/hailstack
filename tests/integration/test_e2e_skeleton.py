@@ -62,8 +62,7 @@ class CleanupPlan:
         if not self.destroy_armed or self.config_path is None:
             return
 
-        self.destroy_command_file = self.config_path.with_suffix(
-            ".destroy.txt")
+        self.destroy_command_file = self.config_path.with_suffix(".destroy.txt")
         self.destroy_command_file.write_text(
             (
                 f'printf "%s\\n" "integration-skeleton" | '

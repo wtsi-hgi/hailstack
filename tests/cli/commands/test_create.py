@@ -24,8 +24,10 @@
 """Acceptance tests for the D1 create CLI command."""
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Never
 
 import pytest
 from typer.testing import CliRunner
@@ -89,6 +91,10 @@ class FakeOpenStackClient:
         networks: set[str] | None = None,
         available_floating_ips: set[str] | None = None,
         existing_volumes: set[str] | None = None,
+        unavailable_volumes: set[str] | None = None,
+        attached_volumes_by_server: dict[str, set[str]] | None = None,
+        volume_names: dict[str, str] | None = None,
+        volume_sizes_gb: dict[str, int] | None = None,
         compute_quota: ComputeQuota | None = None,
         volume_quota: VolumeQuota | None = None,
     ) -> None:
@@ -107,11 +113,21 @@ class FakeOpenStackClient:
         )
         self.networks = networks if networks is not None else {"private-net"}
         self.available_floating_ips = (
-            available_floating_ips if available_floating_ips is not None else set()
+            available_floating_ips if available_floating_ips is not None else set[str](
+            )
         )
         self.existing_volumes = (
-            existing_volumes if existing_volumes is not None else set()
+            existing_volumes if existing_volumes is not None else set[str]()
         )
+        self.unavailable_volumes = (
+            unavailable_volumes if unavailable_volumes is not None else set[str](
+            )
+        )
+        self.attached_volumes_by_server = (
+            attached_volumes_by_server if attached_volumes_by_server is not None else {}
+        )
+        self.volume_names = volume_names if volume_names is not None else {}
+        self.volume_sizes_gb = volume_sizes_gb if volume_sizes_gb is not None else {}
         self.compute_quota = compute_quota or ComputeQuota()
         self.volume_quota = volume_quota or VolumeQuota()
 
@@ -135,6 +151,29 @@ class FakeOpenStackClient:
         """Report whether an existing volume is present."""
         return volume_id in self.existing_volumes
 
+    def volume_is_available(self, volume_id: str) -> bool:
+        """Report whether an existing volume can be attached."""
+        return (
+            volume_id in self.existing_volumes
+            and volume_id not in self.unavailable_volumes
+        )
+
+    def volume_is_attached_to_server(self, volume_id: str, server_name: str) -> bool:
+        """Report whether an existing volume is attached to one server."""
+        return volume_id in self.attached_volumes_by_server.get(server_name, set())
+
+    def attached_volume_size_gb(
+        self,
+        server_name: str,
+        *,
+        volume_name: str,
+    ) -> int | None:
+        """Return the size of a named volume attached to one server."""
+        for volume_id in self.attached_volumes_by_server.get(server_name, set()):
+            if self.volume_names.get(volume_id) == volume_name:
+                return self.volume_sizes_gb.get(volume_id)
+        return None
+
     def get_compute_quota(self) -> ComputeQuota:
         """Return available compute quota."""
         return self.compute_quota
@@ -154,16 +193,23 @@ class FakePulumiRunner:
         create_result: FakeCreateResult | None = None,
         backend_error: Exception | None = None,
         up_error: Exception | None = None,
+        cleanup_error: Exception | None = None,
     ) -> None:
         """Initialise fake Pulumi responses."""
         self.preview_output = preview_output
         self.create_result = create_result or FakeCreateResult("203.0.113.10")
         self.backend_error = backend_error
         self.up_error = up_error
+        self.cleanup_error = cleanup_error
+        self.stack_exists_value = False
+        self.current_master_public_ip_value: str | None = None
+        self.current_stack_outputs_value: dict[str, object] = {}
         self.checked_backend = 0
+        self.stack_exists_calls = 0
         self.preview_calls = 0
         self.up_calls = 0
         self.destroy_calls = 0
+        self.cleanup_failed_create_calls = 0
 
     def check_backend_access(self, config: object) -> None:
         """Record backend validation and optionally fail."""
@@ -172,11 +218,33 @@ class FakePulumiRunner:
         if self.backend_error is not None:
             raise self.backend_error
 
-    def preview(self, config: object, bundle: object) -> str:
+    def stack_exists(self, config: object) -> bool:
+        """Return whether the fake backend already has the target stack."""
+        del config
+        self.stack_exists_calls += 1
+        return self.stack_exists_value
+
+    def preview(
+        self,
+        config: object,
+        bundle: object,
+        *,
+        stack_exists: bool | None = None,
+    ) -> str:
         """Return a preview-only Pulumi output string."""
-        del config, bundle
+        del config, bundle, stack_exists
         self.preview_calls += 1
         return self.preview_output
+
+    def current_master_public_ip(self, config: object) -> str | None:
+        """Return the current stack master public IP for update preflight."""
+        del config
+        return self.current_master_public_ip_value
+
+    def current_stack_outputs(self, config: object) -> Mapping[str, object]:
+        """Return the current stack outputs for update preflight."""
+        del config
+        return dict(self.current_stack_outputs_value)
 
     def up(self, config: object, bundle: object) -> FakeCreateResult:
         """Return a fake create result or fail."""
@@ -186,10 +254,12 @@ class FakePulumiRunner:
             raise self.up_error
         return self.create_result
 
-    def destroy(self, config: object, bundle: object) -> None:
-        """Record automatic cleanup calls."""
+    def cleanup_failed_create(self, config: object, bundle: object) -> None:
+        """Record automatic cleanup calls after failed first-time creates."""
         del config, bundle
-        self.destroy_calls += 1
+        self.cleanup_failed_create_calls += 1
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
 
 
 def test_openstack_optional_show_returns_none_for_missing_resources(
@@ -259,15 +329,25 @@ def _write_config(
     cluster_name: str = "test-cluster",
     cluster_extra: str = "",
     ceph_s3_block: str | None = None,
+    ssh_keys_block: str | None = None,
     volumes_block: str = "",
 ) -> Path:
     """Write a minimal valid create configuration file."""
-    ceph_s3_content = ceph_s3_block or (
-        "[ceph_s3]\n"
-        'endpoint = "https://ceph.example.invalid"\n'
-        'bucket = "hailstack-state"\n'
-        'access_key = "state-access"\n'
-        'secret_key = "state-secret"\n'
+    ceph_s3_content = (
+        ceph_s3_block
+        if ceph_s3_block is not None
+        else (
+            "[ceph_s3]\n"
+            'endpoint = "https://ceph.example.invalid"\n'
+            'bucket = "hailstack-state"\n'
+            'access_key = "state-access"\n'
+            'secret_key = "state-secret"\n'
+        )
+    )
+    ssh_keys_content = (
+        ssh_keys_block
+        if ssh_keys_block is not None
+        else ('[ssh_keys]\npublic_keys = ["ssh-ed25519 AAAA primary@test"]\n')
     )
     path.write_text(
         (
@@ -281,8 +361,7 @@ def _write_config(
             'ssh_username = "ubuntu"\n\n'
             f"{cluster_extra}"
             f"{ceph_s3_content}\n"
-            "[ssh_keys]\n"
-            'public_keys = ["ssh-ed25519 AAAA primary@test"]\n'
+            f"{ssh_keys_content}"
             f"\n{volumes_block}"
         ),
         encoding="utf-8",
@@ -305,15 +384,23 @@ def _install_fakes(
     pulumi_runner: FakePulumiRunner,
 ) -> None:
     """Install fake OpenStack and Pulumi factories into the create module."""
+
+    def fake_create_openstack_preflight_client() -> FakeOpenStackClient:
+        return client
+
+    def fake_create_pulumi_stack_runner(logger: object) -> FakePulumiRunner:
+        del logger
+        return pulumi_runner
+
     monkeypatch.setattr(
         create_module,
         "create_openstack_preflight_client",
-        lambda: client,
+        fake_create_openstack_preflight_client,
     )
     monkeypatch.setattr(
         create_module,
         "create_pulumi_stack_runner",
-        lambda logger: pulumi_runner,
+        fake_create_pulumi_stack_runner,
     )
 
 
@@ -333,6 +420,7 @@ def test_create_dry_run_shows_preview_output(
 
     assert result.exit_code == 0
     assert result.stdout == "Plan: create 4 resources\n"
+    assert fake_runner.stack_exists_calls == 1
     assert fake_runner.preview_calls == 1
     assert fake_runner.up_calls == 0
 
@@ -395,17 +483,22 @@ def test_create_invalid_config_stops_before_pulumi_calls(
         cluster_name="test_cluster",
     )
 
+    def fail_openstack_client() -> Never:
+        raise AssertionError("pre-flight should not run")
+
+    def fail_pulumi_runner(logger: object) -> Never:
+        del logger
+        raise AssertionError("Pulumi should not run")
+
     monkeypatch.setattr(
         create_module,
         "create_openstack_preflight_client",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("pre-flight should not run")),
+        fail_openstack_client,
     )
     monkeypatch.setattr(
         create_module,
         "create_pulumi_stack_runner",
-        lambda logger: (_ for _ in ()).throw(
-            AssertionError("Pulumi should not run")),
+        fail_pulumi_runner,
     )
 
     result = runner.invoke(app, ["create", "--config", str(config_path)])
@@ -430,9 +523,35 @@ def test_create_dry_run_does_not_write_pulumi_state(
 
     assert result.exit_code == 0
     assert fake_runner.checked_backend == 1
+    assert fake_runner.stack_exists_calls == 1
     assert fake_runner.preview_calls == 1
     assert fake_runner.up_calls == 0
     assert fake_runner.destroy_calls == 0
+
+
+def test_create_dry_run_falls_back_to_local_preview_when_backend_unavailable(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow first-create dry runs to use the local preview path without backend."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner(
+        backend_error=S3Error(
+            "Unable to access Ceph S3 backend at ceph.example.invalid"
+        )
+    )
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(
+        app, ["create", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert fake_runner.checked_backend == 1
+    assert fake_runner.stack_exists_calls == 0
+    assert fake_runner.preview_calls == 1
+    assert fake_runner.up_calls == 0
 
 
 def test_create_requires_ceph_s3_credentials_before_pulumi(
@@ -462,6 +581,87 @@ def test_create_requires_ceph_s3_credentials_before_pulumi(
     assert str(result.exception) == (
         "Ceph S3 credentials required for Pulumi state backend"
     )
+    assert fake_runner.checked_backend == 0
+
+
+def test_create_dry_run_allows_local_preview_without_ceph_s3_credentials(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow first-create dry runs to preview locally without backend secrets."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        ceph_s3_block=(
+            "[ceph_s3]\n"
+            'endpoint = ""\n'
+            'bucket = "hailstack-state"\n'
+            'access_key = ""\n'
+            'secret_key = ""\n'
+        ),
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(
+        app, ["create", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert fake_runner.checked_backend == 0
+    assert fake_runner.stack_exists_calls == 0
+    assert fake_runner.preview_calls == 1
+
+
+def test_create_degraded_dry_run_warns_about_backend_independent_blockers(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface first-create blockers even when dry-run must fall back locally."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        cluster_extra='floating_ip = "1.2.3.4"\n',
+        ceph_s3_block=(
+            "[ceph_s3]\n"
+            'endpoint = ""\n'
+            'bucket = "hailstack-state"\n'
+            'access_key = ""\n'
+            'secret_key = ""\n'
+        ),
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(
+        app, ["create", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert (
+        "possible backend-independent blocker: floating IP '1.2.3.4'" in result.stderr
+    )
+
+
+def test_create_requires_ssh_public_keys_before_pulumi(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject missing SSH public keys before creating a Pulumi runner."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        ssh_keys_block="",
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ConfigError)
+    assert str(result.exception) == "ssh_keys.public_keys required"
     assert fake_runner.checked_backend == 0
 
 
@@ -511,7 +711,7 @@ def test_create_missing_master_flavour_raises_resource_error(
     assert result.exit_code == 1
     assert isinstance(result.exception, ResourceNotFoundError)
     assert "m2.2xlarge" in str(result.exception)
-    assert fake_runner.checked_backend == 0
+    assert fake_runner.checked_backend == 1
 
 
 def test_create_missing_network_raises_resource_error(
@@ -531,6 +731,27 @@ def test_create_missing_network_raises_resource_error(
     assert result.exit_code == 1
     assert isinstance(result.exception, ResourceNotFoundError)
     assert "private-net" in str(result.exception)
+
+
+def test_create_missing_lustre_network_raises_resource_error(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a configured Lustre network before entering Pulumi."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        cluster_extra='lustre_network = "missing-lustre"\n',
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ResourceNotFoundError)
+    assert "missing-lustre" in str(result.exception)
 
 
 def test_create_aggregates_missing_image_and_flavour(
@@ -575,7 +796,187 @@ def test_create_runs_cleanup_after_failed_apply(
     assert result.exit_code == 1
     assert isinstance(result.exception, PulumiError)
     assert fake_runner.up_calls == 1
-    assert fake_runner.destroy_calls == 1
+    assert fake_runner.cleanup_failed_create_calls == 1
+
+
+def test_create_does_not_destroy_existing_stack_after_failed_apply(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface update failures without tearing down an existing cluster stack."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner(up_error=PulumiError("apply failed"))
+    fake_runner.stack_exists_value = True
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, PulumiError)
+    assert fake_runner.up_calls == 1
+    assert fake_runner.cleanup_failed_create_calls == 0
+
+
+def test_create_existing_stack_allows_attached_floating_ip_preflight(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow updates to proceed when a configured floating IP is already attached."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        cluster_extra='floating_ip = "1.2.3.4"\n',
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_master_public_ip_value = "1.2.3.4"
+    fake_runner.current_stack_outputs_value = {
+        "master_public_ip": "1.2.3.4",
+        "worker_names": [
+            "test-cluster-worker-01",
+            "test-cluster-worker-02",
+            "test-cluster-worker-03",
+        ],
+        "master_flavour": "m2.2xlarge",
+        "worker_flavour": "m2.xlarge",
+    }
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert fake_runner.up_calls == 1
+
+
+def test_create_existing_stack_validates_changed_floating_ip_value(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject unavailable replacement floating IPs during update preflight."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        cluster_extra='floating_ip = "1.2.3.4"\n',
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_master_public_ip_value = "5.6.7.8"
+    fake_runner.current_stack_outputs_value = {
+        "master_public_ip": "5.6.7.8",
+        "worker_names": [
+            "test-cluster-worker-01",
+            "test-cluster-worker-02",
+            "test-cluster-worker-03",
+        ],
+        "master_flavour": "m2.2xlarge",
+        "worker_flavour": "m2.xlarge",
+    }
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ResourceNotFoundError)
+    assert "1.2.3.4" in str(result.exception)
+
+
+def test_create_existing_stack_requires_full_compute_quota_for_updates(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require full compute quota because updates may replace live instances."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_stack_outputs_value = {
+        "master_public_ip": "203.0.113.10",
+        "worker_names": ["test-cluster-worker-01", "test-cluster-worker-02"],
+        "master_flavour": "m2.2xlarge",
+        "worker_flavour": "m2.xlarge",
+    }
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            compute_quota=ComputeQuota(
+                instances_available=0,
+                cores_available=0,
+                ram_mb_available=0,
+            ),
+            volume_quota=VolumeQuota(gigabytes_available=0),
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, QuotaExceededError)
+    assert "instances: need 3, available 0" in str(result.exception)
+
+
+def test_create_existing_stack_uses_full_compute_quota_for_scale_up_preflight(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use conservative full-capacity checks for updates that may replace nodes."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_stack_outputs_value = {
+        "master_public_ip": "203.0.113.10",
+        "worker_names": ["test-cluster-worker-01"],
+        "master_flavour": "m2.2xlarge",
+        "worker_flavour": "m2.xlarge",
+    }
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            compute_quota=ComputeQuota(
+                instances_available=0,
+                cores_available=0,
+                ram_mb_available=0,
+            )
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, QuotaExceededError)
+    assert "instances: need 3, available 0" in str(result.exception)
+
+
+def test_create_preserves_original_up_error_when_cleanup_also_fails(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface the original apply failure even when cleanup also errors."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner(
+        up_error=PulumiError("apply failed"),
+        cleanup_error=PulumiError("cleanup failed"),
+    )
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, PulumiError)
+    assert str(result.exception) == (
+        "apply failed; cleanup after failed create also failed: cleanup failed"
+    )
+    assert fake_runner.cleanup_failed_create_calls == 1
 
 
 def test_create_success_prints_exact_final_status_line(
@@ -682,6 +1083,190 @@ def test_create_missing_existing_volume_raises_resource_error(
     assert result.exit_code == 1
     assert isinstance(result.exception, ResourceNotFoundError)
     assert "vol-123" in str(result.exception)
+
+
+def test_create_unavailable_existing_volume_raises_resource_error(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject existing volumes that are already attached or otherwise unusable."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=('[volumes]\nexisting_volume_id = "vol-123"\n'),
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            existing_volumes={"vol-123"},
+            unavailable_volumes={"vol-123"},
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ResourceNotFoundError)
+    assert "vol-123" in str(result.exception)
+    assert "not available for attachment" in str(result.exception)
+
+
+def test_create_existing_stack_allows_current_attached_existing_volume(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow reruns to keep using the existing volume already on the stack."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=('[volumes]\nexisting_volume_id = "vol-123"\n'),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_stack_outputs_value = {"attached_volume_id": "vol-123"}
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            existing_volumes={"vol-123"},
+            unavailable_volumes={"vol-123"},
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert fake_runner.up_calls == 1
+
+
+def test_create_existing_stack_allows_legacy_existing_volume_attachment(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow reruns for legacy stacks that predate attached volume exports."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=('[volumes]\nexisting_volume_id = "vol-123"\n'),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            existing_volumes={"vol-123"},
+            unavailable_volumes={"vol-123"},
+            attached_volumes_by_server={"test-cluster-master": {"vol-123"}},
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert fake_runner.up_calls == 1
+
+
+def test_create_existing_stack_skips_legacy_managed_volume_quota_recheck(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Avoid recharging quota for legacy stacks that predate volume exports."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=(
+            '[volumes]\ncreate = true\nname = "legacy-data"\nsize_gb = 100\n'
+        ),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            attached_volumes_by_server={
+                "test-cluster-master": {"vol-managed"}},
+            volume_names={"vol-managed": "legacy-data"},
+            volume_sizes_gb={"vol-managed": 100},
+            volume_quota=VolumeQuota(gigabytes_available=0),
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert fake_runner.up_calls == 1
+
+
+def test_create_existing_stack_rejects_repointed_legacy_existing_volume(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject repointing a legacy stack to an unavailable different existing volume."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=('[volumes]\nexisting_volume_id = "vol-new"\n'),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            existing_volumes={"vol-old", "vol-new"},
+            unavailable_volumes={"vol-new"},
+            attached_volumes_by_server={"test-cluster-master": {"vol-old"}},
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ResourceNotFoundError)
+    assert "vol-new" in str(result.exception)
+
+
+def test_create_existing_stack_checks_incremental_legacy_managed_volume_quota(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Charge quota only for the additional capacity on legacy managed volumes."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=(
+            '[volumes]\ncreate = true\nname = "legacy-data"\nsize_gb = 100\n'
+        ),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    _install_fakes(
+        monkeypatch,
+        FakeOpenStackClient(
+            attached_volumes_by_server={
+                "test-cluster-master": {"vol-managed"}},
+            volume_names={"vol-managed": "legacy-data"},
+            volume_sizes_gb={"vol-managed": 40},
+            volume_quota=VolumeQuota(gigabytes_available=50),
+        ),
+        fake_runner,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, QuotaExceededError)
+    assert "gigabytes: need 60, available 50" in str(result.exception)
 
 
 def test_create_aggregates_missing_flavour_and_quota_error(

@@ -419,28 +419,37 @@ def test_repo_packer_scripts_are_executable_and_embed_version_checks() -> None:
     expected_checks = {
         "base.sh": [
             "/opt/hailstack/base-venv",
-            "hailstack-jupyterlab.service",
+            "/opt/hailstack/overlay-venv",
+            "cryptsetup",
+            "jupyter-lab.service",
+            "netcat-openbsd",
             "nginx.service",
+            "nfs-common",
+            "nfs-kernel-server",
         ],
         "ubuntu/packages.sh": [
+            '"${PYTHON_BIN}" --version 2>&1 | grep -F "$PYTHON_VERSION"',
             'grep -F "$JAVA_VERSION"',
-            'grep -F "$PYTHON_VERSION"',
             'grep -F "$SCALA_VERSION"',
         ],
         "ubuntu/hadoop.sh": [
             'grep -F "$HADOOP_VERSION"',
-            "hadoop-namenode.service",
-            "hadoop-datanode.service",
+            "hdfs-namenode.service",
+            "hdfs-datanode.service",
+            "yarn-rm.service",
+            "yarn-nm.service",
+            "mapred-history.service",
         ],
         "ubuntu/spark.sh": [
             'grep -F "$SPARK_VERSION"',
             "spark-master.service",
+            "spark-history-server.service",
             "spark-worker.service",
         ],
         "ubuntu/hail.sh": ['grep -F "$HAIL_VERSION"'],
         "ubuntu/jupyter.sh": [
             'grep -F "$JUPYTER_VERSION"',
-            "hailstack-jupyterlab.service",
+            "jupyter-lab.service",
         ],
         "ubuntu/gnomad.sh": ['grep -F "$GNOMAD_VERSION"'],
         "ubuntu/uv.sh": ['grep -F "$UV_VERSION"'],
@@ -570,9 +579,19 @@ def test_e2_base_venv_preinstalls_are_declared_via_uv() -> None:
     """Declare the base venv and its preinstalled Python tools directly in scripts."""
     expected_tokens = {
         PACKER_SCRIPTS_PATH / "base.sh": [
-            "python3 -m venv /opt/hailstack/base-venv",
+            'PYTHON_BIN="python${PYTHON_VERSION}"',
+            'PYTHON_VENV_PACKAGE="${PYTHON_BIN}-venv"',
+            "add-apt-repository -y ppa:deadsnakes/ppa",
+            '"${PYTHON_BIN}" -m venv /opt/hailstack/base-venv',
             "/opt/hailstack/base-venv/bin/python -m pip install --upgrade pip uv",
+            "/opt/hailstack/base-venv/bin/python -m venv --system-site-packages "
+            "/opt/hailstack/overlay-venv",
+            "printf '%s\\n' \"${BASE_PURELIB}\" > "
+            '"${OVERLAY_PURELIB}/hailstack-base-venv.pth"',
             "test -d /opt/hailstack/base-venv",
+            "test -d /opt/hailstack/overlay-venv",
+            "ExecStart=/opt/hailstack/overlay-venv/bin/python -m jupyterlab "
+            "--ip=0.0.0.0 --port=8888 --no-browser --allow-root",
         ],
         PACKER_SCRIPTS_PATH / "ubuntu/hail.sh": [
             "test -d /opt/hailstack/base-venv",

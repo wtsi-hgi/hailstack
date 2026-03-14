@@ -25,6 +25,7 @@
 
 import hashlib
 import json
+from urllib.request import Request
 
 from hailstack.config.schema import CephS3Config
 from hailstack.storage import rollout as rollout_module
@@ -36,10 +37,12 @@ class RecordingUploader:
     def __init__(self) -> None:
         """Initialise object storage state."""
         self.objects: dict[str, bytes] = {}
+        self.keys: list[str] = []
 
     def put_object(self, *, key: str, body: bytes, content_type: str) -> None:
         """Store uploaded objects for later assertions."""
         assert content_type == "application/json"
+        self.keys.append(key)
         self.objects[key] = body
 
 
@@ -230,3 +233,85 @@ def test_upload_rollout_uses_documented_object_keys(monkeypatch) -> None:
         "hailstack/test-cluster/rollouts/20260313T120000Z/manifest.json",
         "hailstack/test-cluster/rollouts/20260313T120000Z/nodes/test-cluster-master.json",
     ]
+
+
+def test_upload_rollout_publishes_manifest_after_node_results(monkeypatch) -> None:
+    """Upload per-node results first so manifests cannot point at missing nodes."""
+    uploader = RecordingUploader()
+    monkeypatch.setattr(
+        rollout_module, "create_rollout_uploader", lambda config: uploader
+    )
+    rollout_module.upload_rollout(
+        manifest=rollout_module.RolloutManifest(
+            cluster_name="test-cluster",
+            timestamp="2026-03-13T12:00:00Z",
+            system_packages=["mc"],
+            python_packages=[],
+            node_count=1,
+            success_count=1,
+            failure_count=0,
+            sha256="",
+        ),
+        node_results=[
+            rollout_module.NodeResult(
+                hostname="test-cluster-master",
+                success=True,
+                system_installed=["mc"],
+                python_installed=[],
+                errors=[],
+            )
+        ],
+        ceph_s3_config=CephS3Config(
+            endpoint="https://ceph.example.invalid",
+            bucket="hailstack-state",
+            access_key="access",
+            secret_key="secret",
+        ),
+        cluster_name="test-cluster",
+    )
+
+    assert uploader.keys == [
+        "hailstack/test-cluster/rollouts/20260313T120000Z/nodes/test-cluster-master.json",
+        "hailstack/test-cluster/rollouts/20260313T120000Z/manifest.json",
+    ]
+
+
+def test_ceph_s3_uploader_defaults_bare_hostnames_to_https(
+    monkeypatch,
+) -> None:
+    """Treat documented bare Ceph endpoints as HTTPS URLs."""
+    recorded: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    def fake_urlopen(request: Request):
+        recorded["url"] = request.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr(rollout_module, "urlopen", fake_urlopen)
+
+    uploader = rollout_module.CephS3Uploader(
+        CephS3Config(
+            endpoint="ceph.example.invalid",
+            bucket="hailstack-state",
+            access_key="access",
+            secret_key="secret",
+        )
+    )
+
+    uploader.put_object(
+        key="hailstack/test-cluster/rollouts/latest/manifest.json",
+        body=b"{}",
+        content_type="application/json",
+    )
+
+    assert recorded["url"] == (
+        "https://ceph.example.invalid/"
+        "hailstack-state/hailstack/test-cluster/rollouts/latest/manifest.json"
+    )
