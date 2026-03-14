@@ -369,8 +369,7 @@ def _resolve_summary(
         )
 
     workers = [
-        StatusWorker(name=_display_name(
-            cluster_name, worker_name), ip=worker_ip)
+        StatusWorker(name=_display_name(cluster_name, worker_name), ip=worker_ip)
         for worker_name, worker_ip in zip(worker_names, worker_ips, strict=True)
     ]
     return ClusterSummary(
@@ -423,8 +422,7 @@ def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value.strip()
 
 
@@ -434,8 +432,7 @@ def _optional_output_int(outputs: Mapping[str, object], key: str) -> int | None:
     if value is None:
         return None
     if not isinstance(value, int):
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -445,8 +442,7 @@ def _optional_output_bool(outputs: Mapping[str, object], key: str) -> bool | Non
     if value is None:
         return None
     if not isinstance(value, bool):
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -500,8 +496,7 @@ def _resolve_volume(
     """Return the deployed shared-volume summary when one is attached."""
     output_name = _optional_output_str(outputs, "attached_volume_name")
     if output_name is not None:
-        output_size_gb = _optional_output_int(
-            outputs, "managed_volume_size_gb")
+        output_size_gb = _optional_output_int(outputs, "managed_volume_size_gb")
         return VolumeStatus(
             name=output_name,
             size_gb=output_size_gb if output_size_gb and output_size_gb > 0 else None,
@@ -589,8 +584,7 @@ def _require_output_str(
     if value is None:
         value = default
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value.strip()
 
 
@@ -598,14 +592,12 @@ def _require_output_str_list(outputs: Mapping[str, object], key: str) -> list[st
     """Extract a list of strings from stack outputs."""
     value = outputs.get(key)
     if not isinstance(value, list):
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     items = cast(list[object], value)
     strings: list[str] = []
     for item in items:
         if not isinstance(item, str) or not item.strip():
-            raise PulumiError(
-                f"Pulumi stack output '{key}' was missing or invalid")
+            raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
         strings.append(item.strip())
     return strings
 
@@ -694,14 +686,12 @@ def _format_detailed(details: DetailedClusterStatus) -> str:
         nodes = cast(list[str], row["nodes"])
         part = f"{status} ({', '.join(nodes)})"
         if name != current_service and current_service:
-            lines.append(
-                f"  {current_service + ':':<22} {'; '.join(current_parts)}")
+            lines.append(f"  {current_service + ':':<22} {'; '.join(current_parts)}")
             current_parts = []
         current_service = name
         current_parts.append(part)
     if current_service:
-        lines.append(
-            f"  {current_service + ':':<22} {'; '.join(current_parts)}")
+        lines.append(f"  {current_service + ':':<22} {'; '.join(current_parts)}")
 
     lines.append("")
     lines.append("Resources:")
@@ -765,13 +755,11 @@ def _volume_payload(volume: VolumeStatus) -> dict[str, object]:
 def status(
     config: Annotated[
         Path,
-        typer.Option(
-            "--config", help="Path to cluster configuration TOML file."),
+        typer.Option("--config", help="Path to cluster configuration TOML file."),
     ] = Path("./hailstack.toml"),
     detailed: Annotated[
         bool,
-        typer.Option(
-            "--detailed", help="Include SSH health probes and resources."),
+        typer.Option("--detailed", help="Include SSH health probes and resources."),
     ] = False,
     json_output: Annotated[
         bool,
@@ -779,8 +767,7 @@ def status(
     ] = False,
     ssh_key: Annotated[
         Path | None,
-        typer.Option(
-            "--ssh-key", help="SSH private key path (default: agent)."),
+        typer.Option("--ssh-key", help="SSH private key path (default: agent)."),
     ] = None,
     dotenv: Annotated[
         Path | None,
@@ -808,8 +795,7 @@ def status(
                 summary,
                 outputs,
                 loaded_config,
-                master_jump_host=_optional_output_str(
-                    outputs, "master_public_ip"),
+                master_jump_host=_optional_output_str(outputs, "master_public_ip"),
             ),
             ssh_username=loaded_config.cluster.ssh_username,
             ssh_key_path=ssh_key,

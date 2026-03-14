@@ -25,7 +25,7 @@
 
 import asyncio
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Never, Protocol, TypedDict, cast
@@ -361,6 +361,31 @@ def test_master_netdata_toggle_false_skips_port_19999(
                 "hdfs": True,
                 "netdata": False,
             }
+        }
+    )
+
+    mocks, _, _ = _run_stack(config, monkeypatch)
+    rules = _resource_inputs(
+        mocks, "openstack:networking/secGroupRule:SecGroupRule")
+
+    assert not any(rule.get("port_range_min") == 19999 for rule in rules)
+
+
+def test_monitoring_none_disables_default_netdata_port_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not expose Netdata publicly when monitoring is disabled."""
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "ssh_username": "ubuntu",
+            "floating_ip": "",
+            "monitoring": "none",
         }
     )
 
@@ -851,6 +876,9 @@ def test_existing_floating_ip_is_retained_on_destroy(
     """Reuse user-supplied floating IPs via association instead of allocation."""
     recorded: dict[str, object] = {}
 
+    def _fake_from_input(value: object) -> object:
+        return value
+
     class FakeFloatingIpAssociate:
         def __init__(
             self,
@@ -873,10 +901,16 @@ def test_existing_floating_ip_is_retained_on_destroy(
     monkeypatch.setattr(
         resources_module.pulumi.Output,
         "from_input",
-        staticmethod(lambda value: value),
+        cast(object, staticmethod(_fake_from_input)),
     )
 
-    result = resources_module._create_master_floating_ip(
+    create_master_floating_ip = cast(
+        Callable[[ClusterConfig, str, list[str], resources_module.Port], object],
+        # pyright: ignore[reportPrivateUsage]
+        resources_module._create_master_floating_ip,
+    )
+
+    result = create_master_floating_ip(
         _config(
             cluster={
                 "name": "test-cluster",
@@ -891,7 +925,8 @@ def test_existing_floating_ip_is_retained_on_destroy(
         ),
         "test-cluster",
         ["test-cluster"],
-        cast(object, SimpleNamespace(id="test-cluster-master-port-id")),
+        cast(resources_module.Port, SimpleNamespace(
+            id="test-cluster-master-port-id")),
     )
 
     assert result == "1.2.3.4"

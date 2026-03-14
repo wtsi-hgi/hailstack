@@ -1269,6 +1269,32 @@ def test_create_existing_stack_checks_incremental_legacy_managed_volume_quota(
     assert "gigabytes: need 60, available 50" in str(result.exception)
 
 
+def test_create_existing_stack_rejects_managed_volume_shrink(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject shrinking an existing managed volume during create updates."""
+    del command_matrix
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        volumes_block=(
+            '[volumes]\ncreate = true\nname = "legacy-data"\nsize_gb = 40\n'
+        ),
+    )
+    fake_runner = FakePulumiRunner()
+    fake_runner.stack_exists_value = True
+    fake_runner.current_stack_outputs_value = {"managed_volume_size_gb": 100}
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ConfigError)
+    assert "Managed volumes cannot be shrunk" in str(result.exception)
+    assert fake_runner.up_calls == 0
+
+
 def test_create_aggregates_missing_flavour_and_quota_error(
     command_matrix: Path,
     tmp_path: Path,

@@ -53,8 +53,7 @@ def test_check_service_health_reports_active_service(
         assert allowed_returncodes == (3,)
         return "active\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command",
-                        fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -65,8 +64,7 @@ def test_check_service_health_reports_active_service(
     )
 
     assert result == [
-        health_module.ServiceStatus(
-            name="spark-master", active=True, node="master")
+        health_module.ServiceStatus(name="spark-master", active=True, node="master")
     ]
 
 
@@ -91,8 +89,7 @@ def test_check_service_health_reports_inactive_service(
         assert allowed_returncodes == (3,)
         return "inactive\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command",
-                        fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -103,8 +100,7 @@ def test_check_service_health_reports_inactive_service(
     )
 
     assert result == [
-        health_module.ServiceStatus(
-            name="spark-master", active=False, node="master")
+        health_module.ServiceStatus(name="spark-master", active=False, node="master")
     ]
 
 
@@ -127,8 +123,7 @@ def test_check_service_health_surfaces_unreachable_host_and_continues(
             raise SSHError("Unable to reach node worker-01")
         return "active\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command",
-                        fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -175,8 +170,7 @@ def test_gather_resource_usage_returns_float_percentages(
         )
         return "23\n45.5\n12\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command",
-                        fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.gather_resource_usage(
@@ -219,8 +213,7 @@ def test_run_ssh_command_surfaces_auth_failures_without_relabeling_transport(
     with pytest.raises(SSHError, match="Permission denied"):
         asyncio.run(
             health_module._run_ssh_command(
-                health_module.HealthProbeTarget(
-                    name="master", address="master"),
+                health_module.HealthProbeTarget(name="master", address="master"),
                 "ubuntu",
                 ("true",),
             )

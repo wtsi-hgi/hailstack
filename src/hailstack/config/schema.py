@@ -220,8 +220,7 @@ class ClusterSettings(BaseModel):
     def validate_name(cls, value: str) -> str:
         """Reject invalid cluster names."""
         if CLUSTER_NAME_PATTERN.fullmatch(value) is None:
-            raise ValueError(
-                "Invalid cluster name: must match ^[a-z][a-z0-9-]{1,62}$")
+            raise ValueError("Invalid cluster name: must match ^[a-z][a-z0-9-]{1,62}$")
         return value
 
     @field_validator("ssh_username")
@@ -267,8 +266,7 @@ class ClusterSettings(BaseModel):
         try:
             IPv4Address(value)
         except ValueError as error:
-            raise ValueError(
-                "floating_ip must be valid IPv4 address") from error
+            raise ValueError("floating_ip must be valid IPv4 address") from error
         return value
 
     @model_validator(mode="after")
@@ -309,8 +307,7 @@ class ClusterConfig(BaseModel):
             and require_backend
             and not self.ceph_s3.has_required_credentials()
         ):
-            raise ConfigError(
-                "Ceph S3 credentials required for Pulumi state backend")
+            raise ConfigError("Ceph S3 credentials required for Pulumi state backend")
 
         if command == "create" and not self.ssh_keys.public_keys:
             raise ConfigError("ssh_keys.public_keys required")

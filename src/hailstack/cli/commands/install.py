@@ -215,8 +215,7 @@ class AnsibleInstallExecutor:
             worker_jump_host=_worker_jump_host(inventory),
             smoke_test=smoke_test,
         )
-        playbook_by_host = {
-            result.hostname: result for result in playbook_results}
+        playbook_by_host = {result.hostname: result for result in playbook_results}
 
         mapped_results: list[_ExecutorNodeResult] = []
         for node in inventory:
@@ -310,8 +309,7 @@ def _read_package_file(path: Path) -> tuple[list[str], list[str]]:
     except FileNotFoundError as error:
         raise ConfigError(f"Package file not found: {path}") from error
     except tomllib.TOMLDecodeError as error:
-        raise ConfigError(
-            f"Invalid package TOML in {path}: {error}") from error
+        raise ConfigError(f"Invalid package TOML in {path}: {error}") from error
     return (
         _package_list_from_section(payload, "system", path),
         _package_list_from_section(payload, "python", path),
@@ -328,8 +326,7 @@ def _package_list_from_section(
     if section is None:
         return []
     if not isinstance(section, dict):
-        raise ConfigError(
-            f"Section [{section_name}] in {path} must be a table")
+        raise ConfigError(f"Section [{section_name}] in {path} must be a table")
 
     packages = section.get("packages")
     if packages is None:
@@ -401,8 +398,7 @@ def _resolve_inventory(
         )
     ]
     inventory.extend(
-        InstallNode(name=name, host=host, role="worker",
-                    jump_host=master_public_host)
+        InstallNode(name=name, host=host, role="worker", jump_host=master_public_host)
         for name, host in zip(worker_names, worker_hosts, strict=True)
     )
     return inventory
@@ -414,8 +410,7 @@ def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -430,8 +425,7 @@ def _require_output_str(
     if value is None:
         value = default
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -439,15 +433,13 @@ def _require_output_str_list(outputs: Mapping[str, object], key: str) -> list[st
     """Extract a list of non-empty strings from stack outputs."""
     value = outputs.get(key)
     if not isinstance(value, list):
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
 
     items = cast(list[object], value)
     strings: list[str] = []
     for item in items:
         if not isinstance(item, str) or not item.strip():
-            raise PulumiError(
-                f"Pulumi stack output '{key}' was missing or invalid")
+            raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
         strings.append(item.strip())
 
     return strings
@@ -682,8 +674,7 @@ def _run_install_with_retries(
         for result in results:
             final_results[result.node_name] = result
 
-        failed_names = [
-            result.node_name for result in results if not result.success]
+        failed_names = [result.node_name for result in results if not result.success]
         if not failed_names:
             break
 
@@ -712,8 +703,7 @@ def _build_rollout_manifest(
 ) -> RolloutManifest:
     """Create a rollout manifest and populate its SHA-256 digest."""
     timestamp = (
-        datetime.now(UTC).replace(
-            microsecond=0).isoformat().replace("+00:00", "Z")
+        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
     success_count = sum(1 for result in node_results if result.success)
     failure_count = len(node_results) - success_count
@@ -794,8 +784,7 @@ def _require_requested_packages(
 def install(
     config: Annotated[
         Path,
-        typer.Option(
-            "--config", help="Path to cluster configuration TOML file."),
+        typer.Option("--config", help="Path to cluster configuration TOML file."),
     ] = Path("./hailstack.toml"),
     system: Annotated[
         list[str] | None,
@@ -818,8 +807,7 @@ def install(
     ] = None,
     ssh_key: Annotated[
         Path | None,
-        typer.Option(
-            "--ssh-key", help="SSH private key path (default: agent)."),
+        typer.Option("--ssh-key", help="SSH private key path (default: agent)."),
     ] = None,
     dotenv: Annotated[
         Path | None,

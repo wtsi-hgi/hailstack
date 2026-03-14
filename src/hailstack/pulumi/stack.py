@@ -85,8 +85,7 @@ class AutomationStackRunner:
             endpoint = config.ceph_s3.endpoint.removeprefix("https://").removeprefix(
                 "http://"
             )
-            raise S3Error(
-                f"Unable to access Ceph S3 backend at {endpoint}: {detail}")
+            raise S3Error(f"Unable to access Ceph S3 backend at {endpoint}: {detail}")
 
     def cli_env(self, config: ClusterConfig) -> dict[str, str]:
         """Return the environment for Pulumi CLI commands run outside automation."""
@@ -309,8 +308,7 @@ class AutomationStackRunner:
                 raise PulumiError(
                     f"Pulumi stack hailstack-{config.cluster.name} does not exist"
                 ) from error
-            raise PulumiError(
-                f"Unable to initialise Pulumi stack: {error}") from error
+            raise PulumiError(f"Unable to initialise Pulumi stack: {error}") from error
 
     @staticmethod
     def _backend_url(config: ClusterConfig) -> str:
@@ -327,8 +325,7 @@ class AutomationStackRunner:
 
     def _pulumi_home(self) -> Path:
         """Return a workspace-scoped Pulumi home that avoids global backend state."""
-        workspace_hash = hashlib.sha256(
-            str(self._work_dir).encode("utf-8")).hexdigest()
+        workspace_hash = hashlib.sha256(str(self._work_dir).encode("utf-8")).hexdigest()
         return Path(tempfile.gettempdir()) / "hailstack-pulumi-home" / workspace_hash
 
     @staticmethod

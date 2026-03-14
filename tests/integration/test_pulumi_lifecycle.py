@@ -190,8 +190,7 @@ class RecordingMocks(pulumi.runtime.Mocks):
             state.setdefault("all_fixed_ips", [self._ip_for_name(args.name)])
 
         if args.typ == "openstack:networking/floatingIp:FloatingIp":
-            state.setdefault(
-                "address", f"203.0.113.{self._next_floating_ip_octet}")
+            state.setdefault("address", f"203.0.113.{self._next_floating_ip_octet}")
             self._next_floating_ip_octet += 1
 
         self.resources.append(
@@ -209,8 +208,7 @@ class RecordingMocks(pulumi.runtime.Mocks):
     ) -> tuple[dict[str, object], list[tuple[str, str]]]:
         """Mock the OpenStack network lookup data source."""
         typed_args = cast(MockCallArgsView, args)
-        invoke_args = {str(key): value for key,
-                       value in typed_args.args.items()}
+        invoke_args = {str(key): value for key, value in typed_args.args.items()}
         if args.token == "openstack:networking/getNetwork:getNetwork":
             network_name = str(invoke_args["name"])
             return {"id": f"{network_name}-id", "name": network_name}, []
@@ -393,8 +391,7 @@ class FakeAutomationEnvironment:
             "select_stack",
             fake_select_stack,
         )
-        monkeypatch.setattr(stack_module.subprocess,
-                            "run", fake_subprocess_run)
+        monkeypatch.setattr(stack_module.subprocess, "run", fake_subprocess_run)
 
     def run_program(self, program: Callable[[], None]) -> ProgramSnapshot:
         """Execute one Pulumi program with provider mocks and resolve exports."""
@@ -408,8 +405,7 @@ class FakeAutomationEnvironment:
             exported[name] = value
 
         try:
-            pulumi.runtime.set_mocks(
-                mocks, project="hailstack", stack="integration")
+            pulumi.runtime.set_mocks(mocks, project="hailstack", stack="integration")
             pulumi.export = capture_export
             program()
             _drain_resource_registrations(loop, mocks)
@@ -467,8 +463,7 @@ def _drain_resource_registrations(
     for _ in range(50):
         loop.run_until_complete(asyncio.sleep(0.01))
         current_count = len(mocks.resources)
-        pending_tasks = [task for task in asyncio.all_tasks(
-            loop) if not task.done()]
+        pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
         if current_count == previous_count and not pending_tasks:
             stable_iterations += 1
             if stable_iterations >= 2:
@@ -535,8 +530,7 @@ def lifecycle_environment(
     config_path = _write_config(tmp_path / "cluster.toml")
     environment = FakeAutomationEnvironment()
     environment.install(monkeypatch)
-    monkeypatch.setattr(
-        create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
+    monkeypatch.setattr(create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
     monkeypatch.setattr(
         create_module,
         "create_openstack_preflight_client",
@@ -552,8 +546,7 @@ def test_create_dry_run_reports_expected_resource_count(
     """Preview the mocked create and report the exact resource count."""
     config_path, environment = lifecycle_environment
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 0
     assert result.stdout == (
@@ -570,8 +563,7 @@ def test_create_failed_update_keeps_existing_stack(
     """Do not destroy an existing stack when a subsequent update fails."""
     config_path, environment = lifecycle_environment
 
-    create_result = runner.invoke(
-        app, ["create", "--config", str(config_path)])
+    create_result = runner.invoke(app, ["create", "--config", str(config_path)])
     assert create_result.exit_code == 0
     original_snapshot = environment.snapshot("hailstack-test-cluster")
 
@@ -614,8 +606,7 @@ def test_destroy_removes_created_stack_after_confirmation(
     """Destroy the created mocked stack and remove it from the backend."""
     config_path, environment = lifecycle_environment
 
-    create_result = runner.invoke(
-        app, ["create", "--config", str(config_path)])
+    create_result = runner.invoke(app, ["create", "--config", str(config_path)])
     assert create_result.exit_code == 0
 
     destroy_result = runner.invoke(

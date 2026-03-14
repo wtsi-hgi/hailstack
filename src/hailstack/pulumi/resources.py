@@ -110,7 +110,7 @@ def create_cluster_resources(
     _create_public_rules(
         f"{cluster_name}-master-sg",
         master_security_group.id,
-        config.security_groups.master,
+        _effective_master_security_group(config),
         MASTER_RULES,
     )
     _create_public_rules(
@@ -336,6 +336,13 @@ def _create_public_rules(
             port_range_max=port_max,
             remote_ip_prefix="0.0.0.0/0",
         )
+
+
+def _effective_master_security_group(config: ClusterConfig) -> SecurityGroupConfig:
+    """Disable the public Netdata rule when monitoring itself is disabled."""
+    if config.cluster.monitoring == "netdata":
+        return config.security_groups.master
+    return config.security_groups.master.model_copy(update={"netdata": False})
 
 
 def _create_internal_rule(

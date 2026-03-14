@@ -58,8 +58,7 @@ def test_version_flag_prints_semver() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert re.fullmatch(r"hailstack \d+\.\d+\.\d+\n",
-                        result.stdout) is not None
+    assert re.fullmatch(r"hailstack \d+\.\d+\.\d+\n", result.stdout) is not None
 
 
 def test_invalid_command_reports_error_on_stderr() -> None:

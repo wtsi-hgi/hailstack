@@ -119,12 +119,10 @@ def test_destroy_dry_run_shows_preview_output(
 ) -> None:
     """Show the destroy plan without destroying resources."""
     config_path = _write_config(tmp_path / "destroy.toml")
-    fake_runner = FakePulumiDestroyRunner(
-        preview_output="Plan: destroy 4 resources\n")
+    fake_runner = FakePulumiDestroyRunner(preview_output="Plan: destroy 4 resources\n")
     _install_fake_runner(monkeypatch, fake_runner)
 
-    result = runner.invoke(
-        app, ["destroy", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["destroy", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 0
     assert result.stdout == "Plan: destroy 4 resources\n"
@@ -234,5 +232,4 @@ def test_destroy_success_outputs_final_destroyed_line(
     )
 
     assert result.exit_code == 0
-    assert result.stdout.splitlines(
-    )[-1] == "Cluster 'test-cluster' destroyed."
+    assert result.stdout.splitlines()[-1] == "Cluster 'test-cluster' destroyed."

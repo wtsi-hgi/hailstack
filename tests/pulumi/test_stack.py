@@ -135,8 +135,7 @@ def test_preview_new_stack_allows_missing_runtime_secrets(
         allow_missing_runtime_secrets: bool = False,
     ) -> None:
         del config, bundle, retain_created_volume
-        recorded_allow_missing_runtime_secrets.append(
-            allow_missing_runtime_secrets)
+        recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
 
     def fake_create_stack(**kwargs: object) -> FakeAutoStack:
         program = kwargs.get("program")
@@ -198,10 +197,8 @@ def test_cleanup_failed_create_disables_volume_retention(
     ) -> None:
         del config, bundle
         recorded_retain_created_volume.append(retain_created_volume)
-        recorded_allow_missing_runtime_secrets.append(
-            allow_missing_runtime_secrets)
-        recorded_allow_missing_ssh_public_keys.append(
-            allow_missing_ssh_public_keys)
+        recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
+        recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
 
     def fake_select_stack(**kwargs: object) -> FakeAutoStack:
         program = kwargs.get("program")
@@ -250,10 +247,8 @@ def test_destroy_uses_current_config_for_volume_retention(
     ) -> None:
         del config, bundle
         recorded_retain_created_volume.append(retain_created_volume)
-        recorded_allow_missing_runtime_secrets.append(
-            allow_missing_runtime_secrets)
-        recorded_allow_missing_ssh_public_keys.append(
-            allow_missing_ssh_public_keys)
+        recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
+        recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
 
     def fake_select_stack(**kwargs: object) -> FakeAutoStack:
         program = kwargs.get("program")
@@ -313,10 +308,8 @@ def test_destroy_rehydrates_program_for_existing_floating_ip_retention(
     ) -> None:
         del config, bundle
         recorded_retain_created_volume.append(retain_created_volume)
-        recorded_allow_missing_runtime_secrets.append(
-            allow_missing_runtime_secrets)
-        recorded_allow_missing_ssh_public_keys.append(
-            allow_missing_ssh_public_keys)
+        recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
+        recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
 
     def fake_select_stack(**kwargs: object) -> FakeAutoStack:
         program = kwargs.get("program")
@@ -366,8 +359,7 @@ def test_pulumi_env_defaults_to_workspace_scoped_home(
     """Use an isolated Pulumi home unless the caller already set one."""
     monkeypatch.delenv("PULUMI_HOME", raising=False)
 
-    runner = stack_module.AutomationStackRunner(
-        work_dir=stack_module.REPOSITORY_ROOT)
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
     env = runner._pulumi_env(_config())
 
     assert env["PULUMI_HOME"].startswith(
@@ -381,8 +373,7 @@ def test_pulumi_env_preserves_explicit_pulumi_home(
     """Respect an explicit Pulumi home instead of overwriting it."""
     monkeypatch.setenv("PULUMI_HOME", "/tmp/custom-pulumi-home")
 
-    runner = stack_module.AutomationStackRunner(
-        work_dir=stack_module.REPOSITORY_ROOT)
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
     env = runner._pulumi_env(_config())
 
     assert env["PULUMI_HOME"] == "/tmp/custom-pulumi-home"
@@ -392,7 +383,6 @@ def test_cli_env_matches_automation_env(monkeypatch: pytest.MonkeyPatch) -> None
     """Use the same Pulumi environment for CLI reads and automation actions."""
     monkeypatch.delenv("PULUMI_HOME", raising=False)
 
-    runner = stack_module.AutomationStackRunner(
-        work_dir=stack_module.REPOSITORY_ROOT)
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
 
     assert runner.cli_env(_config()) == runner._pulumi_env(_config())

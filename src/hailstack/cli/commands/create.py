@@ -42,6 +42,7 @@ from hailstack.config.parser import load_config
 from hailstack.config.schema import ClusterConfig
 from hailstack.config.validator import validate_bundle
 from hailstack.errors import (
+    ConfigError,
     ImageNotFoundError,
     NetworkError,
     PulumiError,
@@ -536,6 +537,12 @@ def _run_preflight_validation(
                 )
             )
             if current_managed_volume_size_gb is not None:
+                if required_gigabytes < current_managed_volume_size_gb:
+                    raise ConfigError(
+                        "Managed volumes cannot be shrunk: requested "
+                        f"{required_gigabytes} GiB but deployed volume is "
+                        f"{current_managed_volume_size_gb} GiB"
+                    )
                 required_gigabytes = max(
                     required_gigabytes - current_managed_volume_size_gb,
                     0,

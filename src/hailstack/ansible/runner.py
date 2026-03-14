@@ -233,8 +233,7 @@ def _read_results_file(path: Path) -> list[NodeResult]:
 def _coerce_node_result(payload: object) -> NodeResult:
     """Validate one node result payload from the playbook output."""
     if not isinstance(payload, dict):
-        raise AnsibleError(
-            "Install playbook returned a non-object node result")
+        raise AnsibleError("Install playbook returned a non-object node result")
 
     data = cast(dict[str, object], payload)
     hostname = data.get("hostname")
@@ -250,8 +249,7 @@ def _coerce_node_result(payload: object) -> NodeResult:
     if not isinstance(changed, bool):
         raise AnsibleError("Install playbook returned an invalid changed flag")
     if not isinstance(verification, dict):
-        raise AnsibleError(
-            "Install playbook returned invalid verification metadata")
+        raise AnsibleError("Install playbook returned invalid verification metadata")
 
     return NodeResult(
         hostname=hostname,
@@ -274,8 +272,7 @@ def _coerce_string_list(value: object) -> list[str]:
     strings: list[str] = []
     for item in items:
         if not isinstance(item, str):
-            raise AnsibleError(
-                "Install playbook returned an invalid string list")
+            raise AnsibleError("Install playbook returned an invalid string list")
         strings.append(item)
     return strings
 

@@ -80,8 +80,7 @@ def validate_command_config_bundle(
 def build_image_cmd(
     config: Annotated[
         Path,
-        typer.Option(
-            "--config", help="Path to cluster configuration TOML file."),
+        typer.Option("--config", help="Path to cluster configuration TOML file."),
     ] = Path("./hailstack.toml"),
     bundle: Annotated[
         str | None,

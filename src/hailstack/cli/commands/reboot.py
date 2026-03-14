@@ -314,8 +314,7 @@ class SSHRebootExecutor:
         except subprocess.TimeoutExpired:
             if treat_transport_error_as_unreachable:
                 return False
-            raise SSHError(
-                f"SSH command timed out for {target.name}") from None
+            raise SSHError(f"SSH command timed out for {target.name}") from None
 
         stderr = result.stderr.strip()
         if result.returncode == 0:
@@ -349,8 +348,7 @@ class SSHRebootExecutor:
             if ssh_key_path is not None:
                 ssh_command.extend(["-i", str(ssh_key_path)])
             if target.jump_host:
-                ssh_command.extend(
-                    ["-J", f"{ssh_username}@{target.jump_host}"])
+                ssh_command.extend(["-J", f"{ssh_username}@{target.jump_host}"])
             ssh_command.extend([f"{ssh_username}@{target.host}", *command])
             return subprocess.run(
                 ssh_command,
@@ -450,8 +448,7 @@ def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -467,8 +464,7 @@ def _select_targets(
 
     candidate = requested_node.strip()
     if _is_master_reference(candidate, cluster_name):
-        raise typer.BadParameter(
-            "Cannot reboot master node", param_hint="--node")
+        raise typer.BadParameter("Cannot reboot master node", param_hint="--node")
 
     for target in inventory:
         if _matches_target(target, candidate, cluster_name=cluster_name):
@@ -488,8 +484,7 @@ def _require_output_str(
     if value is None:
         value = default
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
     return value.strip()
 
 
@@ -497,15 +492,13 @@ def _require_output_str_list(outputs: Mapping[str, object], key: str) -> list[st
     """Extract a list of non-empty strings from stack outputs."""
     value = outputs.get(key)
     if not isinstance(value, list):
-        raise PulumiError(
-            f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
 
     items = cast(list[object], value)
     strings: list[str] = []
     for item in items:
         if not isinstance(item, str) or not item.strip():
-            raise PulumiError(
-                f"Pulumi stack output '{key}' was missing or invalid")
+            raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
         strings.append(item.strip())
 
     return strings
@@ -536,8 +529,7 @@ def _is_master_reference(candidate: str, cluster_name: str) -> bool:
     normalized_candidate = candidate.strip().lower()
     cluster_prefix = f"{cluster_name.lower()}-"
     if normalized_candidate.startswith(cluster_prefix):
-        normalized_candidate = normalized_candidate.removeprefix(
-            cluster_prefix)
+        normalized_candidate = normalized_candidate.removeprefix(cluster_prefix)
     return normalized_candidate == "master" or normalized_candidate.startswith(
         "master-"
     )

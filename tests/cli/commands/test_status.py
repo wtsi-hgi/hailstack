@@ -298,8 +298,7 @@ def test_status_detailed_human_output_includes_service_statuses(
         probe=FakeStatusProbe(detailed_status=_detailed_status()),
     )
 
-    result = runner.invoke(
-        app, ["status", "--config", str(config_path), "--detailed"])
+    result = runner.invoke(app, ["status", "--config", str(config_path), "--detailed"])
 
     assert result.exit_code == 0
     assert "Services:" in result.stdout
@@ -329,8 +328,7 @@ def test_status_detailed_human_output_includes_resource_usage(
         probe=FakeStatusProbe(detailed_status=_detailed_status()),
     )
 
-    result = runner.invoke(
-        app, ["status", "--config", str(config_path), "--detailed"])
+    result = runner.invoke(app, ["status", "--config", str(config_path), "--detailed"])
 
     assert result.exit_code == 0
     assert "Resources:" in result.stdout
@@ -377,8 +375,7 @@ def test_status_json_output_is_machine_readable(
     config_path = _write_config(tmp_path / "status.toml")
     _, fake_probe = _install_fakes(monkeypatch)
 
-    result = runner.invoke(
-        app, ["status", "--config", str(config_path), "--json"])
+    result = runner.invoke(app, ["status", "--config", str(config_path), "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -431,10 +428,8 @@ def test_status_json_detailed_output_includes_services_and_resources(
         "node": "master",
         "status": "ok",
     }
-    assert any(service["name"] ==
-               "spark-worker" for service in payload["services"])
-    assert any(resource["node"] ==
-               "worker-02" for resource in payload["resources"])
+    assert any(service["name"] == "spark-worker" for service in payload["services"])
+    assert any(resource["node"] == "worker-02" for resource in payload["resources"])
 
 
 def test_status_prefers_deployed_outputs_over_drifted_config(
@@ -553,8 +548,7 @@ def test_status_detailed_prefers_deployed_service_metadata_over_drifted_config(
         probe=FakeStatusProbe(detailed_status=_detailed_status()),
     )
 
-    result = runner.invoke(
-        app, ["status", "--config", str(config_path), "--detailed"])
+    result = runner.invoke(app, ["status", "--config", str(config_path), "--detailed"])
 
     assert result.exit_code == 0
     inventory = fake_probe.calls[0]["inventory"]
@@ -645,8 +639,7 @@ def test_status_cluster_not_found_raises_documented_error(
     config_path = _write_config(tmp_path / "status.toml")
     _install_fakes(
         monkeypatch,
-        stack_runner=FakeStatusStackRunner(
-            error=PulumiError("Cluster not found")),
+        stack_runner=FakeStatusStackRunner(error=PulumiError("Cluster not found")),
     )
 
     result = runner.invoke(app, ["status", "--config", str(config_path)])
@@ -669,8 +662,7 @@ def test_status_detailed_marks_unreachable_workers_without_failing_others(
         ),
     )
 
-    result = runner.invoke(
-        app, ["status", "--config", str(config_path), "--detailed"])
+    result = runner.invoke(app, ["status", "--config", str(config_path), "--detailed"])
 
     assert result.exit_code == 0
     assert "spark-worker:" in result.stdout
@@ -745,8 +737,7 @@ def test_status_probe_treats_legacy_jupyter_service_name_as_jupyter_lab(
         assert services == {"master": ("jupyter-lab", "hailstack-jupyterlab")}
         return [
             SimpleNamespace(name="jupyter-lab", active=False, node="master"),
-            SimpleNamespace(name="hailstack-jupyterlab",
-                            active=True, node="master"),
+            SimpleNamespace(name="hailstack-jupyterlab", active=True, node="master"),
         ]
 
     async def fake_gather_resource_usage_targets(

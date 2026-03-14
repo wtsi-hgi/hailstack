@@ -190,8 +190,7 @@ def _load_host_mapping(value: object, *, context: str) -> dict[str, HostVarsPayl
     host_payload = _require_dict(value, context=context)
     hosts: dict[str, HostVarsPayload] = {}
     for hostname, raw_host_vars in host_payload.items():
-        host_vars = _require_dict(
-            raw_host_vars, context=f"{context} host vars")
+        host_vars = _require_dict(raw_host_vars, context=f"{context} host vars")
         hosts[hostname] = HostVarsPayload(
             ansible_host=_require_str(
                 host_vars["ansible_host"], context="ansible_host"
@@ -335,10 +334,8 @@ def test_run_install_playbook_installs_system_packages_on_all_inventory_hosts(
     assert capture.invocation is not None
     system_install_task = tasks["Install requested system packages"]
     verify_system_task = tasks["Verify requested system packages with dpkg-query"]
-    system_install_body = _task_module(
-        system_install_task, "ansible.builtin.apt")
-    verify_system_body = _task_module(
-        verify_system_task, "ansible.builtin.command")
+    system_install_body = _task_module(system_install_task, "ansible.builtin.apt")
+    verify_system_body = _task_module(verify_system_task, "ansible.builtin.command")
 
     assert capture.invocation.command[:2] == [
         "ansible-playbook",
@@ -387,8 +384,7 @@ def test_run_install_playbook_installs_system_packages_on_all_inventory_hosts(
         _require_str(system_install_body["name"], context="apt name")
         == "{{ system_packages }}"
     )
-    assert _require_str(
-        system_install_body["state"], context="apt state") == "present"
+    assert _require_str(system_install_body["state"], context="apt state") == "present"
     assert _require_bool(
         system_install_body["update_cache"], context="apt update_cache"
     )
@@ -649,8 +645,7 @@ def test_install_playbook_keeps_base_venv_immutable_and_installs_into_overlay() 
         == "/opt/hailstack/base-venv"
     )
     assert (
-        _require_str(play_vars["overlay_venv_path"],
-                     context="overlay_venv_path")
+        _require_str(play_vars["overlay_venv_path"], context="overlay_venv_path")
         == "/opt/hailstack/overlay-venv"
     )
     assert _require_list(
@@ -735,8 +730,7 @@ def test_install_playbook_verifies_overlay_imports_from_base_and_overlay() -> No
         "{{ hailstack_base_python_packages }}"
     )
     assert (
-        _require_str(requested_import_task["loop"],
-                     context="requested import loop")
+        _require_str(requested_import_task["loop"], context="requested import loop")
         == "{{ python_packages }}"
     )
     assert _require_list(
@@ -941,6 +935,5 @@ def test_run_install_playbook_keeps_partial_results_on_nonzero_exit(
         ssh_key_path=None,
     )
 
-    assert [result.hostname for result in results] == [
-        "198.51.100.10", "10.0.0.21"]
+    assert [result.hostname for result in results] == ["198.51.100.10", "10.0.0.21"]
     assert [result.success for result in results] == [True, False]

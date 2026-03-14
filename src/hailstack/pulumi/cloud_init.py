@@ -231,11 +231,9 @@ def _nginx_locations(worker_count: int, monitoring_enabled: bool) -> list[str]:
     ]
     for index in range(1, worker_count + 1):
         backend = f"http://worker-{index:02d}:8042/"
-        locations.append(
-            f"  location /nm{index:02d}/ {{ proxy_pass {backend}; }}")
+        locations.append(f"  location /nm{index:02d}/ {{ proxy_pass {backend}; }}")
     if monitoring_enabled:
-        locations.append(
-            "  location /netdata/ { proxy_pass http://127.0.0.1:19999/; }")
+        locations.append("  location /netdata/ { proxy_pass http://127.0.0.1:19999/; }")
     return locations
 
 
@@ -354,8 +352,7 @@ def _service_commands(config: ClusterConfig) -> list[str]:
     commands: list[str] = []
     for service in services:
         commands.append(f"systemctl enable {service}")
-        commands.append(
-            f"systemctl restart {service} || systemctl start {service}")
+        commands.append(f"systemctl restart {service} || systemctl start {service}")
     return commands
 
 
@@ -367,8 +364,7 @@ def _worker_service_commands(config: ClusterConfig) -> list[str]:
     commands: list[str] = []
     for service in services:
         commands.append(f"systemctl enable {service}")
-        commands.append(
-            f"systemctl restart {service} || systemctl start {service}")
+        commands.append(f"systemctl restart {service} || systemctl start {service}")
     return commands
 
 
@@ -408,8 +404,7 @@ def _extras_commands(config: ClusterConfig) -> list[str]:
             ]
         )
     if config.extras.python_packages:
-        packages = " ".join(quote(package)
-                            for package in config.extras.python_packages)
+        packages = " ".join(quote(package) for package in config.extras.python_packages)
         commands.extend(
             [
                 f"{BASE_VENV_PATH}/bin/python -m venv --system-site-packages "
@@ -612,8 +607,7 @@ def _master_install_directories(config: ClusterConfig) -> str:
         "/etc/exports.d",
     ]
     if _netdata_enabled(config):
-        directories.extend(
-            [NETDATA_DIR, NETDATA_GO_D_PATH, NETDATA_HEALTH_D_PATH])
+        directories.extend([NETDATA_DIR, NETDATA_GO_D_PATH, NETDATA_HEALTH_D_PATH])
     return "install -d -m 0755 " + " ".join(directories)
 
 
@@ -652,8 +646,7 @@ def generate_master_cloud_init(
         f"# Hailstack bundle {bundle.id}",
         _master_install_directories(config),
         f"install -d -m 0700 /home/{username}/.ssh",
-        *_here_doc("/etc/hosts", "EOF_HOSTS",
-                   _hosts_content(config, worker_ips)),
+        *_here_doc("/etc/hosts", "EOF_HOSTS", _hosts_content(config, worker_ips)),
         *_here_doc(
             f"/home/{username}/.ssh/authorized_keys",
             "EOF_AUTH_KEYS",
@@ -684,8 +677,7 @@ def generate_master_cloud_init(
         f"htpasswd -bc {HTPASSWD_PATH} hailstack {quote(web_password)}",
         "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 "
         f"-keyout {SSL_KEY_PATH} -out {SSL_CERT_PATH} -subj '/CN=hailstack'",
-        *_here_doc(NGINX_SITE_PATH, "EOF_NGINX_SITE",
-                   _nginx_config_content(config)),
+        *_here_doc(NGINX_SITE_PATH, "EOF_NGINX_SITE", _nginx_config_content(config)),
         *_master_netdata_commands(config, resolved_netdata_api_key),
         *_volume_commands(config, volume_password, attached_volume_id),
         *_master_data_commands(config),

@@ -169,8 +169,7 @@ def test_upload_rollout_populates_sha256_from_manifest_content(monkeypatch) -> N
     manifest_key = next(
         key for key in uploader.objects if key.endswith("/manifest.json")
     )
-    uploaded_manifest = json.loads(
-        uploader.objects[manifest_key].decode("utf-8"))
+    uploaded_manifest = json.loads(uploader.objects[manifest_key].decode("utf-8"))
     assert set(uploaded_manifest) == {
         "cluster_name",
         "timestamp",

@@ -174,10 +174,8 @@ def test_l1_netdata_separate_renders_generate_fresh_api_keys(
     """Generate a fresh UUID4 key for each separate cloud-init render."""
     monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
 
-    first_result = generate_master_cloud_init(
-        _config(), _bundle(), _worker_ips())
-    second_result = generate_master_cloud_init(
-        _config(), _bundle(), _worker_ips())
+    first_result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+    second_result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
     assert _extract_netdata_api_key(first_result) != _extract_netdata_api_key(
         second_result
@@ -241,10 +239,8 @@ def test_l1_monitoring_none_omits_netdata_from_master_and_worker(
         }
     )
 
-    master_result = generate_master_cloud_init(
-        config, _bundle(), _worker_ips())
-    worker_result = generate_worker_cloud_init(
-        config, _bundle(), _master_ip(), 1)
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
 
     assert "netdata" not in master_result
     assert "netdata" not in worker_result
