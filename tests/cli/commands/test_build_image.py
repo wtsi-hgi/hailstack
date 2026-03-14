@@ -108,8 +108,7 @@ def test_build_image_cmd_raises_bundle_not_found_before_packer_invoked(
 ) -> None:
     """Reject unknown bundle IDs before delegating to the packer builder."""
     del command_matrix
-    config_path = _write_config(
-        tmp_path / "build-image.toml", "removed-bundle")
+    config_path = _write_config(tmp_path / "build-image.toml", "removed-bundle")
 
     def fail_build(*_: object, **__: object) -> str:
         raise AssertionError("builder should not be called")

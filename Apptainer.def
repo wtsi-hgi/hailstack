@@ -1,0 +1,29 @@
+Bootstrap: docker
+From: python:3.14-slim
+
+%files
+  pyproject.toml /opt/hailstack/pyproject.toml
+  README.md /opt/hailstack/README.md
+  bundles.toml /opt/hailstack/bundles.toml
+  example-config.toml /opt/hailstack/example-config.toml
+  src /opt/hailstack/src
+  ansible /opt/hailstack/ansible
+  packer /opt/hailstack/packer
+
+%post
+  apt-get update && apt-get install -y \
+    curl unzip openssh-client uuid-runtime gnupg
+  curl -fsSL https://get.pulumi.com | sh
+  curl -fsSL https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip \
+    -o /tmp/packer.zip
+  unzip -o /tmp/packer.zip -d /usr/local/bin
+  rm /tmp/packer.zip
+  python3.14 -m pip install --no-cache-dir ansible
+  python3.14 -m pip install --no-cache-dir --editable /opt/hailstack
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%environment
+  export PATH="/root/.pulumi/bin:$PATH"
+
+%runscript
+  exec hailstack "$@"

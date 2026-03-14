@@ -22,8 +22,8 @@ Bundles, (7) Volume Management, (8) Security, (9) Monitoring,
 (10) Troubleshooting, (11) FAQ. All code examples use hailstack
 (no osdataproc). Covering all 5 acceptance tests from N1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.2: N2 - Developer and AI documentation
 
@@ -37,5 +37,5 @@ Create CONTRIBUTING.md and AI.md in repo root. CONTRIBUTING.md:
 (4) Key Modules, (5) Common Tasks. Covering all 4 acceptance
 tests from N2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

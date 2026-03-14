@@ -7,4 +7,5 @@ test -d /opt/hailstack/base-venv
 ln -sfn /opt/hailstack/base-venv/bin/uv /usr/local/bin/uv
 
 test -x /opt/hailstack/base-venv/bin/uv
-uv --version
+UV_VERSION="${UV_VERSION:-$(uv --version)}"
+uv --version | grep -F "$UV_VERSION"

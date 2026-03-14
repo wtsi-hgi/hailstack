@@ -26,8 +26,8 @@
 import asyncio
 import re
 from collections.abc import Mapping
-from types import SimpleNamespace
-from typing import Protocol, TypedDict, cast
+from dataclasses import dataclass
+from typing import Never, Protocol, TypedDict, cast
 
 import pulumi
 import pulumi.runtime
@@ -35,6 +35,7 @@ import pytest
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import PulumiError
+from hailstack.pulumi import resources as resources_module
 from hailstack.pulumi.resources import (
     create_cluster_resources,
 )
@@ -65,6 +66,14 @@ class MockCallArgsView(Protocol):
     """Provide a typed view of Pulumi's unparameterized mock call args."""
 
     args: Mapping[str, object]
+
+
+@dataclass
+class FakeNetworkLookup:
+    """Represent a typed fake OpenStack network lookup result."""
+
+    id: str
+    name: str
 
 
 class RecordingMocks(pulumi.runtime.Mocks):
@@ -173,6 +182,8 @@ def _run_stack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[RecordingMocks, dict[str, object], dict[str, object]]:
     """Run the Pulumi program under mocks and resolve returned outputs."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    monkeypatch.setenv("HAILSTACK_VOLUME_PASSWORD", "volume-secret")
     mocks = RecordingMocks()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -216,12 +227,14 @@ def _drain_resource_registrations(
 ) -> None:
     """Wait until mock resource registrations stop increasing."""
     stable_iterations = 0
-    previous_count = len(mocks.resources)
+    previous_count = -1
 
-    for _ in range(20):
-        loop.run_until_complete(asyncio.sleep(0))
+    for _ in range(50):
+        loop.run_until_complete(asyncio.sleep(0.01))
         current_count = len(mocks.resources)
-        if current_count == previous_count:
+        pending_tasks = [task for task in asyncio.all_tasks(
+            loop) if not task.done()]
+        if current_count == previous_count and not pending_tasks:
             stable_iterations += 1
             if stable_iterations >= 2:
                 return
@@ -281,6 +294,13 @@ def _normalize_value(value: object) -> object:
     if isinstance(value, list):
         return [_normalize_value(item) for item in cast(list[object], value)]
     return value
+
+
+def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
+    """Extract the Netdata API key from a rendered cloud-init payload."""
+    match = re.search(r"api key = ([0-9a-f-]{36})", rendered_cloud_init)
+    assert match is not None
+    return match.group(1)
 
 
 def test_num_workers_creates_master_keypair_ports_and_instances(
@@ -379,7 +399,7 @@ def test_volume_creation_attaches_requested_size_to_master(
     attachments = [
         resource["inputs"]
         for resource in mocks.resources
-        if "host_name" in resource["inputs"] and "volume_id" in resource["inputs"]
+        if "instance_id" in resource["inputs"] and "volume_id" in resource["inputs"]
     ]
 
     assert len(volumes) == 1
@@ -390,7 +410,166 @@ def test_volume_creation_attaches_requested_size_to_master(
         "tags": "test-cluster",
     }
     assert len(attachments) == 1
-    assert attachments[0]["host_name"] == "test-cluster-master"
+    assert attachments[0]["instance_id"] == "test-cluster-master-id"
+    assert attachments[0]["device"] == "/dev/vdb"
+
+
+def test_existing_volume_id_attaches_without_creating_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attach a configured existing volume ID without creating a new volume."""
+    recorded: dict[str, object] = {}
+
+    class FakeVolumeAttach:
+        def __init__(
+            self,
+            resource_name: str,
+            *,
+            device: str,
+            instance_id: str,
+            volume_id: str,
+        ) -> None:
+            recorded["attachment_name"] = resource_name
+            recorded["device"] = device
+            recorded["instance_id"] = instance_id
+            recorded["volume_id"] = volume_id
+            self.id = f"{resource_name}-id"
+
+    def fail_if_volume_created(*args: object, **kwargs: object) -> Never:
+        del args, kwargs
+        raise AssertionError(
+            "Volume() should not be called for existing_volume_id")
+
+    monkeypatch.setattr(resources_module, "Volume", fail_if_volume_created)
+    monkeypatch.setattr(resources_module, "VolumeAttach", FakeVolumeAttach)
+
+    volume, attachment = resources_module.create_or_attach_volume(
+        _config(volumes={"existing_volume_id": "volume-123"}),
+        "test-cluster",
+        "test-cluster-master-id",
+        ["test-cluster"],
+    )
+
+    assert volume is None
+    assert attachment is not None
+    assert recorded["attachment_name"] == "test-cluster-vol-attach"
+    assert recorded["device"] == "/dev/vdb"
+    assert recorded["instance_id"] == "test-cluster-master-id"
+    assert recorded["volume_id"] == "volume-123"
+
+
+def test_preserve_on_destroy_true_marks_created_volume_for_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mark created volumes for retention so destroy detaches without deleting."""
+    recorded: dict[str, object] = {}
+
+    class FakeVolume:
+        def __init__(
+            self,
+            resource_name: str,
+            *,
+            name: str,
+            size: int,
+            metadata: dict[str, str],
+            opts: pulumi.ResourceOptions | None = None,
+        ) -> None:
+            recorded["volume_name"] = resource_name
+            recorded["name"] = name
+            recorded["size"] = size
+            recorded["metadata"] = metadata
+            recorded["opts"] = opts
+            self.id = f"{resource_name}-id"
+
+    class FakeVolumeAttach:
+        def __init__(
+            self,
+            resource_name: str,
+            *,
+            device: str,
+            instance_id: str,
+            volume_id: str,
+        ) -> None:
+            recorded["attachment_name"] = resource_name
+            recorded["device"] = device
+            recorded["instance_id"] = instance_id
+            recorded["volume_id"] = volume_id
+            self.id = f"{resource_name}-id"
+
+    monkeypatch.setattr(resources_module, "Volume", FakeVolume)
+    monkeypatch.setattr(resources_module, "VolumeAttach", FakeVolumeAttach)
+
+    volume, attachment = resources_module.create_or_attach_volume(
+        _config(volumes={"create": True, "size_gb": 500,
+                "preserve_on_destroy": True}),
+        "test-cluster",
+        "test-cluster-master-id",
+        ["test-cluster"],
+    )
+
+    assert volume is not None
+    assert attachment is not None
+    assert recorded["volume_name"] == "test-cluster-vol"
+    assert recorded["device"] == "/dev/vdb"
+    assert recorded["instance_id"] == "test-cluster-master-id"
+    assert recorded["volume_id"] == "test-cluster-vol-id"
+    opts = recorded["opts"]
+    assert isinstance(opts, pulumi.ResourceOptions)
+    assert opts.retain_on_delete is True
+
+
+def test_preserve_on_destroy_false_leaves_created_volume_managed_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leave created volumes owned by Pulumi so destroy deletes them by default."""
+    recorded: dict[str, object] = {}
+
+    class FakeVolume:
+        def __init__(
+            self,
+            resource_name: str,
+            *,
+            name: str,
+            size: int,
+            metadata: dict[str, str],
+            opts: pulumi.ResourceOptions | None = None,
+        ) -> None:
+            recorded["opts"] = opts
+            self.id = f"{resource_name}-id"
+
+    class FakeVolumeAttach:
+        def __init__(
+            self,
+            resource_name: str,
+            *,
+            device: str,
+            instance_id: str,
+            volume_id: str,
+        ) -> None:
+            recorded["device"] = device
+            recorded["instance_id"] = instance_id
+            recorded["volume_id"] = volume_id
+            self.id = f"{resource_name}-id"
+
+    monkeypatch.setattr(resources_module, "Volume", FakeVolume)
+    monkeypatch.setattr(resources_module, "VolumeAttach", FakeVolumeAttach)
+
+    volume, attachment = resources_module.create_or_attach_volume(
+        _config(volumes={"create": True, "size_gb": 500,
+                "preserve_on_destroy": False}),
+        "test-cluster",
+        "test-cluster-master-id",
+        ["test-cluster"],
+    )
+
+    assert volume is not None
+    assert attachment is not None
+    assert recorded["device"] == "/dev/vdb"
+    assert recorded["instance_id"] == "test-cluster-master-id"
+    assert recorded["volume_id"] == "test-cluster-vol-id"
+    opts = recorded["opts"]
+    assert isinstance(opts, pulumi.ResourceOptions)
+    assert opts.retain_on_delete is False
 
 
 def test_lustre_ports_use_numbered_name_pattern_for_master_and_workers(
@@ -455,7 +634,7 @@ def test_empty_floating_ip_allocates_new_address(
 def test_existing_floating_ip_is_associated_to_master(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Use the configured floating IP instead of allocating a new one."""
+    """Use the configured floating IP through a managed FloatingIp resource."""
     config = _config(
         cluster={
             "name": "test-cluster",
@@ -480,16 +659,17 @@ def test_existing_floating_ip_is_associated_to_master(
         mocks, "openstack:networking/floatingIpAssociate:FloatingIpAssociate"
     )
 
-    assert floating_ips == []
-    assert associations[0]["floating_ip"] == "1.2.3.4"
-    assert associations[0]["port_id"] == "test-cluster-master-port-id"
+    assert len(floating_ips) == 1
+    assert floating_ips[0]["address"] == "1.2.3.4"
+    assert floating_ips[0]["port_id"] == "test-cluster-master-port-id"
+    assert associations == []
     assert resolved_outputs["master_public_ip"] == "1.2.3.4"
 
 
 def test_destroy_behavior_is_encoded_in_resource_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Own allocated IPs and only associate reused IPs so destroy does the right thing."""
+    """Own both floating-IP paths so destroy always releases the address."""
     allocated_mocks, _, _ = _run_stack(
         _config(
             packer={
@@ -535,9 +715,10 @@ def test_destroy_behavior_is_encoded_in_resource_ownership(
     assert len(allocated_floating_ips) == 1
     assert allocated_floating_ips[0]["port_id"] == "test-cluster-master-port-id"
     assert allocated_associations == []
-    assert reused_floating_ips == []
-    assert len(reused_associations) == 1
-    assert reused_associations[0]["floating_ip"] == "1.2.3.4"
+    assert len(reused_floating_ips) == 1
+    assert reused_floating_ips[0]["address"] == "1.2.3.4"
+    assert reused_floating_ips[0]["port_id"] == "test-cluster-master-port-id"
+    assert reused_associations == []
 
 
 def test_exports_include_public_private_ips_worker_names_cluster_and_bundle(
@@ -564,7 +745,7 @@ def test_exports_include_public_private_ips_worker_names_cluster_and_bundle(
 def test_all_ssh_keys_are_present_in_master_and_worker_cloud_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inject every configured SSH public key into each node user-data payload."""
+    """Render full cloud-init payloads that include every configured SSH key."""
     keys = [
         "ssh-rsa AAAA user1@test",
         "ssh-rsa BBBB user2@test",
@@ -577,7 +758,35 @@ def test_all_ssh_keys_are_present_in_master_and_worker_cloud_init(
 
     for instance in instances:
         user_data = str(instance["user_data"])
+        assert "#!/usr/bin/env bash" in user_data
+        assert "/etc/hadoop/conf/core-site.xml" in user_data
         assert all(key in user_data for key in keys)
+
+
+def test_monitoring_netdata_create_flow_shares_one_api_key_across_all_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the real master and worker cloud-init renderers in one create flow."""
+    mocks, _, _ = _run_stack(_config(), monkeypatch)
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+    user_data_by_name = {
+        str(instance["name"]): str(instance["user_data"]) for instance in instances
+    }
+
+    master_user_data = user_data_by_name["test-cluster-master"]
+    worker_user_data = user_data_by_name["test-cluster-worker-01"]
+    worker_api_keys = {
+        _extract_netdata_api_key(
+            user_data_by_name[f"test-cluster-worker-{index:02d}"])
+        for index in range(1, 4)
+    }
+
+    assert "/etc/jupyter/jupyter_server_config.py" in master_user_data
+    assert "location /netdata/" in master_user_data
+    assert "url: http://worker-01:9864/jmx" in master_user_data
+    assert "destination = 10.0.0.10:19999" in worker_user_data
+    assert "10.0.0.11 worker-01 test-cluster-worker-01" in worker_user_data
+    assert worker_api_keys == {_extract_netdata_api_key(master_user_data)}
 
 
 def test_missing_lustre_network_raises_pulumi_error(
@@ -598,11 +807,11 @@ def test_missing_lustre_network_raises_pulumi_error(
         }
     )
 
-    def fake_get_network(*, name: str, opts: object | None = None) -> SimpleNamespace:
+    def fake_get_network(*, name: str, opts: object | None = None) -> FakeNetworkLookup:
         del opts
         if name == "missing-lustre":
             raise RuntimeError("not found")
-        return SimpleNamespace(id=f"{name}-id", name=name)
+        return FakeNetworkLookup(id=f"{name}-id", name=name)
 
     monkeypatch.setattr(
         "hailstack.pulumi.resources.get_network", fake_get_network)

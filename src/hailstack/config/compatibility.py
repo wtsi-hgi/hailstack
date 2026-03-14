@@ -59,8 +59,7 @@ class CompatibilityMatrix:
         self._default_bundle_id = self._parse_default_bundle_id(document)
 
         if not self._bundles:
-            raise ConfigError(
-                f"No bundles defined in compatibility matrix: {path}")
+            raise ConfigError(f"No bundles defined in compatibility matrix: {path}")
 
     def get_bundle(self, bundle_id: str) -> Bundle:
         """Return a bundle by ID or raise a bundle-specific validation error."""
@@ -87,8 +86,7 @@ class CompatibilityMatrix:
             with path.open("rb") as handle:
                 loaded = cast(object, tomllib.load(handle))
         except FileNotFoundError as error:
-            raise ConfigError(
-                f"Compatibility matrix file not found: {path}") from error
+            raise ConfigError(f"Compatibility matrix file not found: {path}") from error
         except tomllib.TOMLDecodeError as error:
             line_number = getattr(error, "lineno", "unknown")
             column_number = getattr(error, "colno", "unknown")
@@ -164,8 +162,7 @@ class CompatibilityMatrix:
         first_error = error.errors(include_url=False)[0]
         location = ".".join(str(part) for part in first_error["loc"])
         detail = first_error["msg"]
-        raise ConfigError(
-            f"Invalid bundle '{bundle_id}': {location}: {detail}")
+        raise ConfigError(f"Invalid bundle '{bundle_id}': {location}: {detail}")
 
 
 __all__ = ["Bundle", "CompatibilityMatrix"]

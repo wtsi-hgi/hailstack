@@ -24,15 +24,15 @@
 """Pulumi OpenStack resource graph creation for Hailstack clusters."""
 
 from collections.abc import Sequence
+from uuid import uuid4
 
 import pulumi
 from pulumi_openstack.blockstorage.volume import Volume
-from pulumi_openstack.blockstorage.volume_attach import VolumeAttach
 from pulumi_openstack.compute._inputs import InstanceNetworkArgs
 from pulumi_openstack.compute.instance import Instance
 from pulumi_openstack.compute.keypair import Keypair
+from pulumi_openstack.compute.volume_attach import VolumeAttach
 from pulumi_openstack.networking.floating_ip import FloatingIp
-from pulumi_openstack.networking.floating_ip_associate import FloatingIpAssociate
 from pulumi_openstack.networking.get_network import get_network
 from pulumi_openstack.networking.port import Port
 from pulumi_openstack.networking.sec_group import SecGroup
@@ -40,6 +40,10 @@ from pulumi_openstack.networking.sec_group_rule import SecGroupRule
 
 from hailstack.config import Bundle, ClusterConfig, SecurityGroupConfig
 from hailstack.errors import PulumiError
+from hailstack.pulumi.cloud_init import (
+    generate_master_cloud_init,
+    generate_worker_cloud_init,
+)
 
 type PortRule = tuple[int, int]
 
@@ -164,6 +168,16 @@ def create_cluster_resources(
         f"{cluster_name}-worker-{index:02d}"
         for index in range(1, config.cluster.num_workers + 1)
     ]
+    master_private_ip = _first_ip(master_port.all_fixed_ips)
+    worker_private_ip_outputs = [
+        _first_ip(worker_port.all_fixed_ips) for worker_port in worker_ports
+    ]
+    worker_private_ips = (
+        pulumi.Output.all(*worker_private_ip_outputs)
+        if worker_private_ip_outputs
+        else pulumi.Output.from_input([])
+    )
+    shared_netdata_api_key = _netdata_api_key(config)
 
     master_instance = Instance(
         master_name,
@@ -174,12 +188,23 @@ def create_cluster_resources(
         networks=master_networks,
         tags=tags,
         metadata=_instance_metadata(cluster_name, bundle.id, "master"),
-        user_data=_render_cloud_init(
-            config.ssh_keys.public_keys,
-            config.cluster.ssh_username,
+        user_data=worker_private_ips.apply(
+            lambda resolved_worker_ips: _render_master_cloud_init(
+                config,
+                bundle,
+                resolved_worker_ips,
+                shared_netdata_api_key,
+            )
         ),
     )
-    for worker_name, worker_network in zip(worker_names, worker_networks, strict=True):
+    cluster_private_ips = pulumi.Output.all(
+        master_private_ip,
+        *worker_private_ip_outputs,
+    )
+    for worker_index, (worker_name, worker_network) in enumerate(
+        zip(worker_names, worker_networks, strict=True),
+        start=1,
+    ):
         Instance(
             worker_name,
             name=worker_name,
@@ -189,16 +214,23 @@ def create_cluster_resources(
             networks=worker_network,
             tags=tags,
             metadata=_instance_metadata(cluster_name, bundle.id, "worker"),
-            user_data=_render_cloud_init(
-                config.ssh_keys.public_keys,
-                config.cluster.ssh_username,
+            user_data=cluster_private_ips.apply(
+                lambda resolved_private_ips, worker_index=worker_index: (
+                    _render_worker_cloud_init(
+                        config,
+                        bundle,
+                        resolved_private_ips,
+                        worker_index,
+                        shared_netdata_api_key,
+                    )
+                )
             ),
         )
 
-    volume, volume_attachment = _create_or_attach_volume(
+    volume, volume_attachment = create_or_attach_volume(
         config,
         cluster_name,
-        master_instance,
+        master_instance.id,
         tags,
     )
     attach_dependency: pulumi.Input[str] | None = None
@@ -214,10 +246,8 @@ def create_cluster_resources(
 
     outputs: dict[str, pulumi.Output[object]] = {
         "master_public_ip": master_public_ip,
-        "master_private_ip": _first_ip(master_port.all_fixed_ips),
-        "worker_private_ips": pulumi.Output.all(
-            *[_first_ip(worker_port.all_fixed_ips) for worker_port in worker_ports]
-        ),
+        "master_private_ip": master_private_ip,
+        "worker_private_ips": worker_private_ips,
         "worker_names": pulumi.Output.from_input(worker_names),
         "cluster_name": pulumi.Output.from_input(cluster_name),
         "bundle_id": _with_dependency(bundle.id, attach_dependency),
@@ -314,21 +344,14 @@ def _create_master_floating_ip(
     tags: Sequence[str],
     master_port: Port,
 ) -> pulumi.Output[str]:
-    """Allocate a new master floating IP or reuse an existing one."""
-    if config.cluster.floating_ip:
-        association = FloatingIpAssociate(
-            f"{cluster_name}-fip-assoc",
-            floating_ip=config.cluster.floating_ip,
-            port_id=master_port.id,
-        )
-        return _with_dependency(config.cluster.floating_ip, association.id)
-
+    """Create a managed master floating IP, optionally with a fixed address."""
     pool = None
     if config.packer is not None and config.packer.floating_ip_pool:
         pool = config.packer.floating_ip_pool
 
     floating_ip = FloatingIp(
         f"{cluster_name}-fip",
+        address=config.cluster.floating_ip or None,
         pool=pool,
         port_id=master_port.id,
         tags=list(tags),
@@ -350,20 +373,68 @@ def _instance_metadata(cluster_name: str, bundle_id: str, role: str) -> dict[str
     }
 
 
-def _render_cloud_init(public_keys: Sequence[str], ssh_username: str) -> str:
-    """Render the minimal cloud-init needed for SSH key injection in D2."""
-    del ssh_username
-    key_lines = "\n".join(f"  - {key}" for key in public_keys)
-    return f"#cloud-config\nssh_authorized_keys:\n{key_lines}\n"
+def _netdata_api_key(config: ClusterConfig) -> str | None:
+    """Return a per-create shared Netdata key when monitoring is enabled."""
+    if config.cluster.monitoring != "netdata":
+        return None
+    return str(uuid4())
 
 
-def _create_or_attach_volume(
+def _render_master_cloud_init(
+    config: ClusterConfig,
+    bundle: Bundle,
+    worker_ips: Sequence[object],
+    netdata_api_key: str | None,
+) -> str:
+    """Render master user-data from resolved cluster IP addresses."""
+    return generate_master_cloud_init(
+        config,
+        bundle,
+        _resolved_ip_list(worker_ips),
+        netdata_api_key=netdata_api_key,
+    )
+
+
+def _render_worker_cloud_init(
+    config: ClusterConfig,
+    bundle: Bundle,
+    cluster_private_ips: Sequence[object],
+    worker_index: int,
+    netdata_api_key: str | None,
+) -> str:
+    """Render worker user-data from resolved master and worker IP addresses."""
+    resolved_private_ips = _resolved_ip_list(cluster_private_ips)
+    master_ip = resolved_private_ips[0]
+    worker_ips = resolved_private_ips[1:]
+    return generate_worker_cloud_init(
+        config,
+        bundle,
+        master_ip,
+        worker_index,
+        worker_ips=worker_ips,
+        netdata_api_key=netdata_api_key,
+    )
+
+
+def _resolved_ip_list(values: Sequence[object]) -> list[str]:
+    """Convert resolved Pulumi output values into a validated IP list."""
+    resolved_values: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise PulumiError(
+                "Expected resolved fixed IP values to be strings")
+        resolved_values.append(value)
+    return resolved_values
+
+
+def create_or_attach_volume(
     config: ClusterConfig,
     cluster_name: str,
-    master_instance: Instance,
+    master_instance_id: pulumi.Input[str],
     tags: Sequence[str],
 ) -> tuple[Volume | None, VolumeAttach | None]:
     """Create or attach a volume to the master node when configured."""
+    del tags
     volume_id: pulumi.Input[str] | None = None
     if config.volumes.create:
         volume = Volume(
@@ -371,6 +442,9 @@ def _create_or_attach_volume(
             name=f"{cluster_name}-vol",
             size=config.volumes.size_gb,
             metadata=_cluster_value_specs(cluster_name),
+            opts=pulumi.ResourceOptions(
+                retain_on_delete=config.volumes.preserve_on_destroy
+            ),
         )
         volume_id = volume.id
     elif config.volumes.existing_volume_id:
@@ -381,7 +455,8 @@ def _create_or_attach_volume(
 
     attachment = VolumeAttach(
         f"{cluster_name}-vol-attach",
-        host_name=master_instance.name,
+        device="/dev/vdb",
+        instance_id=master_instance_id,
         volume_id=volume_id,
     )
     return volume, attachment
@@ -409,4 +484,4 @@ def _with_dependency(
     return pulumi.Output.from_input(dependency).apply(lambda _dependency: value)
 
 
-__all__ = ["create_cluster_resources"]
+__all__ = ["create_cluster_resources", "create_or_attach_volume"]

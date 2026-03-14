@@ -27,8 +27,8 @@ gnupg, Pulumi, Packer 1.11.2, Ansible, hailstack package.
 Environment: add Pulumi to PATH. Runscript: exec hailstack "$@".
 Final SIF < 500MB. Covering all 4 acceptance tests from M1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.2: M2 - GitHub Actions CI workflow [parallel with 6.1, 6.3]
 
@@ -39,8 +39,8 @@ Create .github/workflows/ci.yml. Three jobs: (1) lint: ruff check
 pytest with coverage. Trigger on push to main and all PRs.
 Covering all 4 acceptance tests from M2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.3: M3 - GitHub Actions release workflow [parallel with 6.1, 6.2]
 
@@ -51,8 +51,8 @@ Build Apptainer SIF. Attach as GitHub release asset.
 Auto-generate release notes from commits. Covering all 3
 acceptance tests from M3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Batch 2 (parallel, after batch 1 is reviewed)
 
@@ -67,8 +67,8 @@ present (master_public_ip, worker_private_ips, cluster_name,
 bundle_id), destroy succeeds. Covering all 3 acceptance tests
 from O1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.5: O2 - Image verification smoke tests [parallel with 6.4, 6.6]
 
@@ -80,8 +80,8 @@ version-check command. Mock environment with version vars.
 Test scripts/base.sh exits 0. Covering all 2 acceptance
 tests from O2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.6: O3 - End-to-end workflow test skeleton [parallel with 6.4, 6.5]
 
@@ -94,5 +94,5 @@ Create test stubs for full lifecycle: build-image, create,
 install, status (default + detailed), reboot, destroy.
 Covering all 3 acceptance tests from O3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

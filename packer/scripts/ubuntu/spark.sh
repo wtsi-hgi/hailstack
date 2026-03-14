@@ -37,6 +37,6 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-/opt/spark/bin/spark-shell --version 2>&1 | grep -F "$SPARK_VERSION"
 test -f /etc/systemd/system/spark-master.service
 test -f /etc/systemd/system/spark-worker.service
+/opt/spark/bin/spark-shell --version 2>&1 | grep -F "$SPARK_VERSION"

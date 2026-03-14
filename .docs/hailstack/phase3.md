@@ -73,7 +73,7 @@ address. On destroy, release FIP to pool. Covering all 3
 acceptance tests from D5.
 
 - [x] implemented
-- [ ] reviewed
+- [x] reviewed
 
 ### Item 3.5: F1 - Volume lifecycle via Pulumi
 
@@ -86,8 +86,8 @@ based on preserve_on_destroy flag. Lustre network support with
 separate ports. LUKS encryption handled in cloud-init layer.
 Covering all 8 acceptance tests from F1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.6: L1 - Netdata configuration
 
@@ -100,5 +100,5 @@ stream clients pointing to master. Master Netdata config includes
 HDFS JMX endpoint monitoring and health alarms for HDFS capacity.
 Nginx proxies /netdata. Covering all 6 acceptance tests from L1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

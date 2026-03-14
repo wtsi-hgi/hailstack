@@ -141,8 +141,7 @@ def _validate_packer_assets(template_path: Path) -> None:
     if non_executable_paths:
         problems.append(f"not executable: {', '.join(non_executable_paths)}")
     if problems:
-        raise PackerError(
-            f"Missing required Packer assets: {'; '.join(problems)}")
+        raise PackerError(f"Missing required Packer assets: {'; '.join(problems)}")
 
 
 def build_image(
@@ -158,8 +157,7 @@ def build_image(
     _validate_packer_assets(template_path)
     active_logger.info("Packer starting")
 
-    result = runner(_packer_command(
-        template_path, _packer_vars(config, bundle)))
+    result = runner(_packer_command(template_path, _packer_vars(config, bundle)))
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise PackerError(f"Packer build failed: {detail}")

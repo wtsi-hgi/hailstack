@@ -23,8 +23,8 @@ collect per-node results. Retry with exponential backoff
 to S3. Log progress to stderr for each stage. Covering all
 14 acceptance tests from G1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.2: G2 - Ansible runner for installs
 
@@ -38,8 +38,8 @@ to inherit base venv). Base venv immutable, overlay receives all
 user packages. Return list of NodeResult per host. Covering all
 5 acceptance tests from G2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.3: G3 - Rollout manifest storage
 
@@ -55,8 +55,8 @@ in Ceph S3. Include
 cluster_name, timestamp (ISO 8601), package lists, success/fail
 counts. Covering all 3 acceptance tests from G3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.4: H1 - Status command
 
@@ -69,8 +69,8 @@ statuses, CPU/MEM/DISK usage). With --json: machine-parseable
 JSON output. Handle unreachable nodes gracefully. Covering all
 7 acceptance tests from H1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.5: H2 - SSH health probe module
 
@@ -85,8 +85,8 @@ yarn-nm, netdata). Gather CPU%, MEM%, DISK% via top/df. Use
 asyncio.gather() for parallel probes. Covering all 4 acceptance
 tests from H2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.6: I1 - Reboot command
 
@@ -98,5 +98,5 @@ SSH to node(s), run sudo reboot, wait for SSH connectivity to
 return (up to 5 min, with backoff retry). Covering all 6
 acceptance tests from I1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

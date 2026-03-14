@@ -24,6 +24,7 @@
 """CLI tests for phase-1 bundle validation semantics."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -31,6 +32,10 @@ from typer.testing import CliRunner
 from hailstack.cli.commands import _bundle_validation
 from hailstack.cli.commands import build_image as build_image_module
 from hailstack.cli.commands import create as create_module
+from hailstack.cli.commands import destroy as destroy_module
+from hailstack.cli.commands import install as install_module
+from hailstack.cli.commands import reboot as reboot_module
+from hailstack.cli.commands import status as status_module
 from hailstack.cli.main import app
 from hailstack.errors import BundleNotFoundError
 
@@ -116,8 +121,30 @@ def test_build_image_validates_bundle_at_command_time(
 
 def test_non_provisioning_commands_do_not_invoke_bundle_validation(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Leave destroy, status, reboot, and install free of CLI-time bundle checks."""
+
+    class FakeCephS3:
+        def has_required_credentials(self) -> bool:
+            return True
+
+    fake_config = SimpleNamespace(
+        cluster=SimpleNamespace(
+            name="test-cluster",
+            bundle="removed-bundle",
+            ssh_username="ubuntu",
+            master_flavour="m2.medium",
+            monitoring="netdata",
+        ),
+        volumes=SimpleNamespace(
+            create=False,
+            name="",
+            size_gb=0,
+            existing_volume_id="",
+        ),
+        ceph_s3=FakeCephS3(),
+    )
 
     def fail_validation(
         command: str,
@@ -138,7 +165,120 @@ def test_non_provisioning_commands_do_not_invoke_bundle_validation(
         fail_validation,
     )
 
-    for command_name in ("destroy", "status", "reboot", "install"):
-        result = runner.invoke(app, [command_name])
+    monkeypatch.setattr(
+        destroy_module, "load_config", lambda config, dotenv: fake_config
+    )
+    monkeypatch.setattr(
+        destroy_module,
+        "create_pulumi_destroy_runner",
+        lambda logger: SimpleNamespace(
+            check_backend_access=lambda config: None,
+            preview_destroy=lambda config: "preview\n",
+            destroy=lambda config: None,
+        ),
+    )
+
+    monkeypatch.setattr(
+        status_module, "load_config", lambda config, dotenv: fake_config
+    )
+    monkeypatch.setattr(
+        status_module,
+        "create_status_stack_runner",
+        lambda logger: SimpleNamespace(
+            get_status_outputs=lambda config: {
+                "cluster_name": "test-cluster",
+                "bundle_id": "removed-bundle",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "worker_private_ips": [],
+                "worker_names": [],
+            }
+        ),
+    )
+
+    monkeypatch.setattr(
+        reboot_module, "load_config", lambda config, dotenv_file=None: fake_config
+    )
+    monkeypatch.setattr(
+        reboot_module,
+        "create_reboot_stack_runner",
+        lambda logger: SimpleNamespace(
+            get_reboot_outputs=lambda config: {
+                "cluster_name": "test-cluster",
+                "worker_private_ips": [],
+                "worker_names": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        reboot_module,
+        "create_reboot_executor",
+        lambda logger: SimpleNamespace(
+            reboot_nodes=lambda inventory, **kwargs: None,
+        ),
+    )
+
+    monkeypatch.setattr(
+        install_module, "load_config", lambda config, dotenv: fake_config
+    )
+    monkeypatch.setattr(
+        install_module,
+        "create_install_stack_runner",
+        lambda logger: SimpleNamespace(
+            get_install_outputs=lambda config: {
+                "cluster_name": "test-cluster",
+                "master_public_ip": "198.51.100.10",
+                "master_private_ip": "10.0.0.10",
+                "worker_private_ips": [],
+                "worker_names": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        install_module,
+        "create_install_executor",
+        lambda logger: SimpleNamespace(
+            run_install=lambda **kwargs: [
+                SimpleNamespace(
+                    node_name="test-cluster-master",
+                    host="198.51.100.10",
+                    success=True,
+                    system_packages=["mc"],
+                    python_packages=[],
+                    smoke_test=None,
+                    verification={
+                        "system": {"mc": True},
+                        "python": {},
+                        "imports": {},
+                        "versions": {},
+                        "software_state_updated": True,
+                    },
+                    error="",
+                    changed=False,
+                    attempts=1,
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        install_module,
+        "create_rollout_recorder",
+        lambda logger: SimpleNamespace(
+            record_rollout=lambda **kwargs: "s3://bucket/manifest.json",
+        ),
+    )
+
+    config_path = tmp_path / "dummy.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    command_invocations = (
+        ["destroy", "--config", str(config_path), "--dry-run"],
+        ["status", "--config", str(config_path)],
+        ["reboot", "--config", str(config_path)],
+        ["install", "--config", str(config_path), "--system", "mc"],
+    )
+
+    for argv in command_invocations:
+        result = runner.invoke(app, argv)
 
         assert result.exit_code == 0

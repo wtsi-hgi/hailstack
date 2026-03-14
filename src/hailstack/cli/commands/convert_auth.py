@@ -113,8 +113,7 @@ def _write_clouds_yaml(yaml_output: str) -> None:
 def convert_auth_command(
     write: Annotated[
         bool,
-        typer.Option(
-            "--write", help="Write to ~/.config/openstack/clouds.yaml."),
+        typer.Option("--write", help="Write to ~/.config/openstack/clouds.yaml."),
     ] = False,
 ) -> None:
     """Convert openrc.sh env vars to clouds.yaml format."""

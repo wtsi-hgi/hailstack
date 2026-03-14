@@ -39,6 +39,6 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-/opt/hadoop/bin/hadoop version | grep -F "$HADOOP_VERSION"
 test -f /etc/systemd/system/hadoop-namenode.service
 test -f /etc/systemd/system/hadoop-datanode.service
+/opt/hadoop/bin/hadoop version | grep -F "$HADOOP_VERSION"

@@ -1,0 +1,32 @@
+name: Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Apptainer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+
+      - name: Build Apptainer SIF
+        run: |
+          mkdir -p dist
+          sudo apptainer build "dist/hailstack-${GITHUB_REF_NAME}.sif" Apptainer.def
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/hailstack-${{ github.ref_name }}.sif
+          generate_release_notes: true

@@ -243,7 +243,7 @@ class ClusterSettings(BaseModel):
 class ClusterConfig(BaseModel):
     """Represent the top-level TOML configuration document."""
 
-    model_config = ConfigDict(extra="allow", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     cluster: ClusterSettings
     volumes: VolumeConfig = Field(default_factory=VolumeConfig)

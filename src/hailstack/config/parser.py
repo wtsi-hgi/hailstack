@@ -59,8 +59,7 @@ def _raise_model_error(error: PydanticValidationError) -> Never:
     ]
     if missing_fields:
         missing_list = ", ".join(missing_fields)
-        raise ConfigError(
-            f"Missing required configuration fields: {missing_list}")
+        raise ConfigError(f"Missing required configuration fields: {missing_list}")
 
     first_error = error.errors(include_url=False)[0]
     raise ValidationError(str(first_error["msg"]))

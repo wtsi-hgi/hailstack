@@ -1,0 +1,337 @@
+---
+- name: Install packages on existing Hailstack nodes
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    base_venv_path: /opt/hailstack/base-venv
+    system_packages: []
+    python_packages: []
+    hailstack_base_python_packages:
+      - hail
+    smoke_test: null
+    overlay_venv_path: /opt/hailstack/overlay-venv
+    software_state_path: /var/lib/hailstack/software-state.json
+    hailstack_result_path: /tmp/hailstack-results.jsonl
+    hailstack_import_check_script: |
+      import importlib
+      import sys
+      from pip._vendor.packaging.requirements import Requirement
+
+      requirement = Requirement(sys.argv[1])
+      aliases = {
+        "pyyaml": "yaml",
+        "python-dateutil": "dateutil",
+        "scikit-image": "skimage",
+        "scikit-learn": "sklearn",
+      }
+      import_name = aliases.get(
+        requirement.name.lower(),
+        requirement.name.replace("-", "_").replace(".", "_"),
+      )
+      importlib.import_module(import_name)
+    hailstack_version_check_script: |
+      import sys
+      from importlib.metadata import PackageNotFoundError, version
+      from pip._vendor.packaging.requirements import Requirement
+
+      requirement = Requirement(sys.argv[1])
+      try:
+        installed_version = version(requirement.name)
+      except PackageNotFoundError:
+        raise SystemExit(1)
+
+      if requirement.specifier and not requirement.specifier.contains(
+        installed_version,
+        prereleases=True,
+      ):
+        raise SystemExit(1)
+  tasks:
+    - name: Ensure controller result file exists
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ hailstack_result_path }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Ensure software state directory exists
+      ansible.builtin.file:
+        path: "{{ software_state_path | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install requested system packages
+      ansible.builtin.apt:
+        name: "{{ system_packages }}"
+        state: present
+        update_cache: true
+      when: system_packages | length > 0
+      register: hailstack_system_install
+      ignore_errors: true
+
+    - name: Ensure overlay virtual environment exists
+      ansible.builtin.command:
+        argv:
+          - "{{ base_venv_path }}/bin/python"
+          - -m
+          - venv
+          - --system-site-packages
+          - "{{ overlay_venv_path }}"
+      args:
+        creates: "{{ overlay_venv_path }}/bin/python"
+      when: python_packages | length > 0
+      register: hailstack_overlay_venv_create
+      ignore_errors: true
+
+    - name: Discover immutable base venv site-packages path
+      ansible.builtin.command:
+        argv:
+          - "{{ base_venv_path }}/bin/python"
+          - -c
+          - import sysconfig; print(sysconfig.get_path('purelib'))
+      when: python_packages | length > 0
+      changed_when: false
+      failed_when: false
+      register: hailstack_base_site_packages
+
+    - name: Discover overlay venv site-packages path
+      ansible.builtin.command:
+        argv:
+          - "{{ overlay_venv_path }}/bin/python"
+          - -c
+          - import sysconfig; print(sysconfig.get_path('purelib'))
+      when: python_packages | length > 0
+      changed_when: false
+      failed_when: false
+      register: hailstack_overlay_site_packages
+
+    - name: Never modify the immutable base environment; expose it via a .pth file
+      ansible.builtin.copy:
+        dest: "{{ hailstack_overlay_site_packages.stdout }}/hailstack-base-venv.pth"
+        mode: "0644"
+        content: "{{ hailstack_base_site_packages.stdout }}\n"
+      when:
+        - python_packages | length > 0
+        - hailstack_base_site_packages.rc == 0
+        - hailstack_overlay_site_packages.rc == 0
+      register: hailstack_overlay_base_path
+      ignore_errors: true
+
+    - name: Install requested Python packages into the overlay venv
+      ansible.builtin.command:
+        argv: "{{ [base_venv_path + '/bin/uv', 'pip', 'install', '--python', overlay_venv_path + '/bin/python'] + python_packages }}"
+      when: python_packages | length > 0
+      register: hailstack_python_install
+      ignore_errors: true
+
+    - name: Run optional smoke test
+      ansible.builtin.shell: "{{ smoke_test }}"
+      when: smoke_test is not none
+      failed_when: false
+      changed_when: false
+      register: hailstack_smoke_test
+
+    - name: Verify requested system packages with dpkg-query
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - -f=${Status}
+          - "{{ item }}"
+      loop: "{{ system_packages }}"
+      when: system_packages | length > 0
+      failed_when: false
+      changed_when: false
+      register: hailstack_system_verification
+
+    - name: Inspect installed Python packages with uv pip list
+      ansible.builtin.command:
+        argv:
+          - "{{ base_venv_path }}/bin/uv"
+          - pip
+          - list
+          - --python
+          - "{{ overlay_venv_path }}/bin/python"
+          - --format
+          - json
+      when: python_packages | length > 0
+      failed_when: false
+      changed_when: false
+      register: hailstack_python_list
+
+    - name: Verify immutable base packages from the overlay venv
+      ansible.builtin.command:
+        argv:
+          - "{{ overlay_venv_path }}/bin/python"
+          - -c
+          - "{{ hailstack_import_check_script }}"
+          - "{{ item }}"
+      loop: "{{ hailstack_base_python_packages }}"
+      when: python_packages | length > 0
+      failed_when: false
+      changed_when: false
+      register: hailstack_base_import_verification
+
+    - name: Verify requested Python package versions
+      ansible.builtin.command:
+        argv:
+          - "{{ overlay_venv_path }}/bin/python"
+          - -c
+          - "{{ hailstack_version_check_script }}"
+          - "{{ item }}"
+      loop: "{{ python_packages }}"
+      when: python_packages | length > 0
+      failed_when: false
+      changed_when: false
+      register: hailstack_version_verification
+
+    - name: Verify requested Python imports
+      ansible.builtin.command:
+        argv:
+          - "{{ overlay_venv_path }}/bin/python"
+          - -c
+          - "{{ hailstack_import_check_script }}"
+          - "{{ item }}"
+      loop: "{{ python_packages }}"
+      when: python_packages | length > 0
+      failed_when: false
+      changed_when: false
+      register: hailstack_import_verification
+
+    - name: Build system verification metadata
+      ansible.builtin.set_fact:
+        hailstack_system_status: >-
+          {% set verification = {} %}
+          {% for result in hailstack_system_verification.results | default([]) %}
+          {% set _ = verification.update({result.item: (result.rc == 0 and 'install ok installed' in (result.stdout | default('')))}) %}
+          {% endfor %}
+          {{ verification }}
+
+    - name: Build installed Python version metadata
+      ansible.builtin.set_fact:
+        hailstack_python_versions: >-
+          {% set versions = {} %}
+          {% if hailstack_python_list is defined and hailstack_python_list.rc == 0 %}
+          {% for package in hailstack_python_list.stdout | from_json %}
+          {% if package.name is defined and package.version is defined %}
+          {% set normalized_name = package.name | lower | regex_replace('[-_.]+', '-') %}
+          {% set _ = versions.update({normalized_name: package.version}) %}
+          {% endif %}
+          {% endfor %}
+          {% endif %}
+          {{ versions }}
+
+    - name: Build Python presence verification metadata
+      ansible.builtin.set_fact:
+        hailstack_python_status: >-
+          {% set verification = {} %}
+          {% for package in python_packages %}
+          {% set distribution_name = package | regex_replace('([<>=!~].*)$', '') | lower | regex_replace('[-_.]+', '-') %}
+          {% set _ = verification.update({package: (distribution_name in hailstack_python_versions)}) %}
+          {% endfor %}
+          {{ verification }}
+
+    - name: Build Python version verification metadata
+      ansible.builtin.set_fact:
+        hailstack_version_status: >-
+          {% set verification = {} %}
+          {% for result in hailstack_version_verification.results | default([]) %}
+          {% set _ = verification.update({result.item: (result.rc == 0)}) %}
+          {% endfor %}
+          {{ verification }}
+
+    - name: Build Python import verification metadata
+      ansible.builtin.set_fact:
+        hailstack_import_status: >-
+          {% set verification = {} %}
+          {% for result in hailstack_import_verification.results | default([]) %}
+          {% set import_name = result.item | regex_replace('([<>=!~].*)$', '') | replace('-', '_') | replace('.', '_') %}
+          {% set _ = verification.update({import_name: (result.rc == 0)}) %}
+          {% endfor %}
+          {{ verification }}
+
+    - name: Build base package import verification metadata
+      ansible.builtin.set_fact:
+        hailstack_base_import_status: >-
+          {% set verification = {} %}
+          {% for result in hailstack_base_import_verification.results | default([]) %}
+          {% set import_name = result.item | regex_replace('([<>=!~].*)$', '') | replace('-', '_') | replace('.', '_') %}
+          {% set _ = verification.update({import_name: (result.rc == 0)}) %}
+          {% endfor %}
+          {{ verification }}
+
+    - name: Update node-local software state
+      ansible.builtin.copy:
+        dest: "{{ software_state_path }}"
+        mode: "0644"
+        content: |
+          {{ {
+            'system_packages': system_packages,
+            'python_packages': python_packages,
+            'smoke_test': smoke_test,
+            'verification': {
+              'system': hailstack_system_status | default({}),
+              'python': hailstack_python_status | default({}),
+              'base_imports': hailstack_base_import_status | default({}),
+              'versions': hailstack_version_status | default({}),
+              'imports': hailstack_import_status | default({}),
+              'smoke_test': hailstack_smoke_test is not defined or hailstack_smoke_test.rc == 0,
+            },
+            'updated_at': lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')
+          } | to_nice_json }}
+      register: hailstack_software_state_write
+      ignore_errors: true
+
+    - name: Append node result on the controller
+      ansible.builtin.lineinfile:
+        path: "{{ hailstack_result_path }}"
+        create: true
+        line: "{{ {
+          'hostname': inventory_hostname,
+          'success': (
+            (hailstack_system_install is not defined or not (hailstack_system_install.failed | default(false))) and
+            (hailstack_overlay_venv_create is not defined or not (hailstack_overlay_venv_create.failed | default(false))) and
+            (hailstack_overlay_base_path is not defined or not (hailstack_overlay_base_path.failed | default(false))) and
+            (hailstack_python_install is not defined or not (hailstack_python_install.failed | default(false))) and
+            (false not in (hailstack_system_status | default({})).values() | list) and
+            (false not in (hailstack_python_status | default({})).values() | list) and
+            (false not in (hailstack_base_import_status | default({})).values() | list) and
+            (false not in (hailstack_version_status | default({})).values() | list) and
+            (false not in (hailstack_import_status | default({})).values() | list) and
+            (hailstack_smoke_test is not defined or hailstack_smoke_test.rc == 0) and
+            not (hailstack_software_state_write.failed | default(false))
+          ),
+          'system_installed': (hailstack_system_status | default({})) | dict2items | selectattr('value') | map(attribute='key') | list,
+          'python_installed': python_packages | select('in', (hailstack_python_status | default({})) | dict2items | selectattr('value') | map(attribute='key') | list) | list,
+          'errors': (
+            []
+            + ([hailstack_system_install.msg | default('system package install failed')] if hailstack_system_install is defined and (hailstack_system_install.failed | default(false)) else [])
+            + ([hailstack_overlay_venv_create.msg | default('overlay virtual environment creation failed')] if hailstack_overlay_venv_create is defined and (hailstack_overlay_venv_create.failed | default(false)) else [])
+            + ([hailstack_overlay_base_path.msg | default('overlay base path configuration failed')] if hailstack_overlay_base_path is defined and (hailstack_overlay_base_path.failed | default(false)) else [])
+            + ([hailstack_python_install.msg | default('python package install failed')] if hailstack_python_install is defined and (hailstack_python_install.failed | default(false)) else [])
+            + (['smoke test failed'] if hailstack_smoke_test is defined and hailstack_smoke_test.rc != 0 else [])
+            + (['software state update failed'] if hailstack_software_state_write.failed | default(false) else [])
+            + ((hailstack_system_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'system package verification failed: \\1') | list)
+            + ((hailstack_python_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'python package verification failed: \\1') | list)
+            + ((hailstack_base_import_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'base package import verification failed: \\1') | list)
+            + ((hailstack_version_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'python package version verification failed: \\1') | list)
+            + ((hailstack_import_status | default({})) | dict2items | rejectattr('value') | map(attribute='key') | map('regex_replace', '^(.*)$', 'python import verification failed: \\1') | list)
+          ),
+          'verification': {
+            'system': hailstack_system_status | default({}),
+            'python': hailstack_python_status | default({}),
+            'base_imports': hailstack_base_import_status | default({}),
+            'imports': hailstack_import_status | default({}),
+            'versions': hailstack_version_status | default({}),
+            'smoke_test': hailstack_smoke_test is not defined or hailstack_smoke_test.rc == 0,
+            'software_state_updated': not (hailstack_software_state_write.failed | default(false))
+          },
+          'changed': (
+            (hailstack_system_install is defined and hailstack_system_install.changed) or
+            (hailstack_overlay_venv_create is defined and hailstack_overlay_venv_create.changed) or
+            (hailstack_overlay_base_path is defined and hailstack_overlay_base_path.changed) or
+            (hailstack_python_install is defined and hailstack_python_install.changed)
+          )
+        } | to_json }}"
+      delegate_to: localhost
+      throttle: 1

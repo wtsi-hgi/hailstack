@@ -23,6 +23,8 @@
 
 """Acceptance tests for D3 master cloud-init generation."""
 
+import re
+
 import pytest
 
 from hailstack.config import Bundle, ClusterConfig
@@ -31,6 +33,17 @@ from hailstack.pulumi.cloud_init import (
     generate_master_cloud_init,
     generate_worker_cloud_init,
 )
+
+
+def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
+    """Extract the Netdata streaming API key from rendered cloud-init."""
+    api_key_match = re.search(
+        r"api key = ([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+        rendered_cloud_init,
+    )
+    assert api_key_match is not None
+    return api_key_match.group(1)
 
 
 def _bundle() -> Bundle:
@@ -99,6 +112,87 @@ def test_monitoring_netdata_enables_netdata_service(
     assert "systemctl enable netdata" in result
 
 
+def test_master_cloud_init_enables_hailstack_jupyter_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enable the packaged Jupyter service name expected by the image build."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert "systemctl enable hailstack-jupyterlab" in result
+
+
+def test_l1_master_netdata_enables_service_and_stream_accept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enable Netdata on the master and accept worker streams with a UUID4 key."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert "systemctl enable netdata" in result
+    assert "/etc/netdata/stream.conf" in result
+    assert "[stream]" in result
+    assert "enabled = yes" in result
+    assert _extract_netdata_api_key(result)
+
+
+def test_l1_worker_netdata_streams_to_master_ip_with_shared_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point worker streaming at the master IP using the same cluster API key."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    shared_api_key = "5e79fb15-0bd0-4cf7-8f3d-0e1f0bb7fbe4"
+
+    master_result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+        netdata_api_key=shared_api_key,
+    )
+    worker_result = generate_worker_cloud_init(
+        _config(),
+        _bundle(),
+        _master_ip(),
+        1,
+        netdata_api_key=shared_api_key,
+    )
+
+    assert "destination = 10.0.0.10:19999" in worker_result
+    assert _extract_netdata_api_key(master_result) == shared_api_key
+    assert _extract_netdata_api_key(worker_result) == shared_api_key
+
+
+def test_l1_netdata_separate_renders_generate_fresh_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generate a fresh UUID4 key for each separate cloud-init render."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    first_result = generate_master_cloud_init(
+        _config(), _bundle(), _worker_ips())
+    second_result = generate_master_cloud_init(
+        _config(), _bundle(), _worker_ips())
+
+    assert _extract_netdata_api_key(first_result) != _extract_netdata_api_key(
+        second_result
+    )
+
+
+def test_l1_nginx_proxies_netdata_with_basic_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the Netdata dashboard behind the existing nginx basic auth."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert "location /netdata/" in result
+    assert "proxy_pass http://127.0.0.1:19999/;" in result
+    assert "auth_basic 'Hailstack';" in result
+
+
 def test_monitoring_none_omits_all_netdata_references(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -123,6 +217,61 @@ def test_monitoring_none_omits_all_netdata_references(
     )
 
     assert "netdata" not in result
+
+
+def test_l1_monitoring_none_omits_netdata_from_master_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppress all Netdata config on both node types when monitoring is disabled."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "ssh_username": "ubuntu",
+            "monitoring": "none",
+        }
+    )
+
+    master_result = generate_master_cloud_init(
+        config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(
+        config, _bundle(), _master_ip(), 1)
+
+    assert "netdata" not in master_result
+    assert "netdata" not in worker_result
+
+
+def test_l1_master_netdata_config_includes_hdfs_and_datanode_jmx_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monitor the NameNode and each DataNode JMX endpoint from the master."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert "http://localhost:9870/jmx" in result
+    assert "http://worker-01:9864/jmx" in result
+    assert "http://worker-02:9864/jmx" in result
+    assert "http://worker-03:9864/jmx" in result
+
+
+def test_l1_master_netdata_health_alarms_cover_hdfs_capacity_and_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configure HDFS capacity thresholds plus missing blocks and dead nodes alarms."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+
+    assert "warn: $this > 70" in result
+    assert "crit: $this > 80" in result
+    assert "missing_blocks" in result
+    assert "dead_nodes" in result
 
 
 def test_hosts_block_contains_master_and_all_workers(
@@ -197,11 +346,42 @@ def test_volume_enabled_adds_luks_and_nfs_export(
     )
 
     assert "cryptsetup luksFormat /dev/vdb /etc/hailstack/volume.key" in result
+    assert "mkfs.ext4 /dev/mapper/hailstack-data" in result
+    assert (
+        "mountpoint -q /home/ubuntu/data || mount /dev/mapper/hailstack-data "
+        "/home/ubuntu/data" in result
+    )
     assert "systemctl enable nfs-server" in result
     assert (
         "echo '/home/ubuntu/data *(rw,sync,no_subtree_check,no_root_squash)'"
         " > /etc/exports.d/hailstack.exports" in result
     )
+
+
+def test_existing_volume_reuses_encrypted_filesystem_without_reformatting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse an attached volume by opening and mounting it without reformatting."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    monkeypatch.setenv("HAILSTACK_VOLUME_PASSWORD", "volume-secret")
+
+    result = generate_master_cloud_init(
+        _config(volumes={"existing_volume_id": "volume-123"}),
+        _bundle(),
+        _worker_ips(),
+    )
+
+    assert (
+        "cryptsetup open /dev/vdb hailstack-data --key-file "
+        "/etc/hailstack/volume.key" in result
+    )
+    assert (
+        "mountpoint -q /home/ubuntu/data || mount /dev/mapper/hailstack-data "
+        "/home/ubuntu/data" in result
+    )
+    assert "systemctl enable nfs-server" in result
+    assert "cryptsetup luksFormat /dev/vdb /etc/hailstack/volume.key" not in result
+    assert "mkfs.ext4 /dev/mapper/hailstack-data" not in result
 
 
 def test_volume_password_is_written_to_the_luks_keyfile(
@@ -229,7 +409,7 @@ def test_missing_volume_password_raises_config_error_when_volume_enabled(
 
     with pytest.raises(
         ConfigError,
-        match="HAILSTACK_VOLUME_PASSWORD required when volumes.create=true",
+        match="HAILSTACK_VOLUME_PASSWORD required when a data volume is attached",
     ):
         generate_master_cloud_init(
             _config(volumes={"create": True, "size_gb": 500}),
@@ -281,7 +461,11 @@ def test_extras_python_packages_are_installed_into_overlay_venv(
         _worker_ips(),
     )
 
-    assert "uv venv /opt/hailstack/overlay-venv" in result
+    assert (
+        "/opt/hailstack/base-venv/bin/python -m venv --system-site-packages "
+        "/opt/hailstack/overlay-venv" in result
+    )
+    assert "hailstack-base-venv.pth" in result
     assert (
         "uv pip install --python /opt/hailstack/overlay-venv/bin/python pandas"
         in result
@@ -461,7 +645,7 @@ def test_worker_monitoring_netdata_enables_streaming_to_master() -> None:
 
     assert "systemctl enable netdata" in result
     assert "/etc/netdata/stream.conf" in result
-    assert "destination = master:19999" in result
+    assert "destination = 10.0.0.10:19999" in result
 
 
 def test_worker_cloud_init_overrides_baked_spark_worker_master_target() -> None:
@@ -551,7 +735,11 @@ def test_worker_extras_python_packages_are_installed_into_overlay_venv() -> None
         1,
     )
 
-    assert "uv venv /opt/hailstack/overlay-venv" in result
+    assert (
+        "/opt/hailstack/base-venv/bin/python -m venv --system-site-packages "
+        "/opt/hailstack/overlay-venv" in result
+    )
+    assert "hailstack-base-venv.pth" in result
     assert (
         "uv pip install --python /opt/hailstack/overlay-venv/bin/python pandas"
         in result

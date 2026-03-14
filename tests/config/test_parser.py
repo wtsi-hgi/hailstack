@@ -155,8 +155,11 @@ name = "$CLUSTER_NAME"
 bundle = "hail-0.2.137-gnomad-3.0.4-r2"
     master_flavour = "m2.medium"
 
-[secrets]
-token = "$API_TOKEN"
+[ceph_s3]
+endpoint = "https://ceph.example.invalid"
+bucket = "hailstack-state"
+access_key = "$API_TOKEN"
+secret_key = "static-secret"
 """.strip(),
     )
     dotenv_path = tmp_path / ".env"
@@ -168,7 +171,26 @@ token = "$API_TOKEN"
     result = load_config(config_path, dotenv_file=dotenv_path)
 
     assert result.cluster.name == "test-cluster"
-    assert result.model_extra == {"secrets": {"token": "val123"}}
+    assert result.ceph_s3.access_key == "val123"
+
+
+def test_load_config_rejects_unknown_top_level_sections(tmp_path: Path) -> None:
+    """Reject undeclared top-level config sections instead of preserving them."""
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+bundle = "hail-0.2.137-gnomad-3.0.4-r2"
+master_flavour = "m2.medium"
+
+[secrets]
+token = "val123"
+""".strip(),
+    )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        load_config(config_path)
 
 
 def test_substitute_env_vars_uses_empty_string_for_undefined_vars_and_logs_warning(

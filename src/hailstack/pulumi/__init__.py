@@ -24,5 +24,6 @@
 """Pulumi resource and stack helpers."""
 
 from hailstack.pulumi.resources import create_cluster_resources
+from hailstack.pulumi.stack import AutomationStackRunner, CreateResult
 
-__all__ = ["create_cluster_resources"]
+__all__ = ["AutomationStackRunner", "CreateResult", "create_cluster_resources"]

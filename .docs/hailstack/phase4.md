@@ -27,8 +27,8 @@ remain. Log progress to stderr for each stage. Handle
 ImageNotFoundError, ResourceNotFoundError, QuotaExceededError,
 and S3Error. Covering all 17 acceptance tests from D1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.2: J1 - Destroy command with confirmation
 
@@ -43,5 +43,5 @@ stage. On success, final stdout line is
 "Cluster '<name>' destroyed.". Covering all 6 acceptance
 tests from J1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

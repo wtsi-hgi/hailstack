@@ -40,6 +40,10 @@ class BundleNotFoundError(ValidationError):
     """Raise when a requested bundle ID is not present in the matrix."""
 
 
+class NetworkError(HailstackError):
+    """Raise when external service access fails unexpectedly."""
+
+
 class PackerError(HailstackError):
     """Raise when a Packer build fails or returns invalid output."""
 
@@ -48,11 +52,42 @@ class PulumiError(HailstackError):
     """Raise when Pulumi resource creation cannot be completed."""
 
 
+class AnsibleError(HailstackError):
+    """Raise when an Ansible operation fails."""
+
+
+class S3Error(HailstackError):
+    """Raise when Ceph S3 state-backend access fails."""
+
+
+class SSHError(HailstackError):
+    """Raise when SSH connectivity or commands fail."""
+
+
+class ImageNotFoundError(HailstackError):
+    """Raise when a required OpenStack image cannot be found."""
+
+
+class ResourceNotFoundError(HailstackError):
+    """Raise when one or more requested OpenStack resources are unavailable."""
+
+
+class QuotaExceededError(HailstackError):
+    """Raise when requested resources exceed available project quota."""
+
+
 __all__ = [
+    "AnsibleError",
     "BundleNotFoundError",
     "ConfigError",
     "HailstackError",
+    "ImageNotFoundError",
+    "NetworkError",
     "PackerError",
     "PulumiError",
+    "QuotaExceededError",
+    "ResourceNotFoundError",
+    "S3Error",
+    "SSHError",
     "ValidationError",
 ]

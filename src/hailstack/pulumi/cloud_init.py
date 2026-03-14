@@ -26,6 +26,7 @@
 import os
 from collections.abc import Sequence
 from shlex import quote
+from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from hailstack.config import Bundle, ClusterConfig
@@ -38,7 +39,12 @@ HTPASSWD_PATH = "/etc/nginx/.hailstack-htpasswd"
 SSL_CERT_PATH = "/etc/nginx/ssl/hailstack.crt"
 SSL_KEY_PATH = "/etc/nginx/ssl/hailstack.key"
 VOLUME_KEY_PATH = "/etc/hailstack/volume.key"
+BASE_VENV_PATH = "/opt/hailstack/base-venv"
 OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
+NETDATA_DIR = "/etc/netdata"
+NETDATA_STREAM_PATH = f"{NETDATA_DIR}/stream.conf"
+NETDATA_GO_D_PATH = f"{NETDATA_DIR}/go.d"
+NETDATA_HEALTH_D_PATH = f"{NETDATA_DIR}/health.d"
 
 
 def _require_env_var(name: str, message: str) -> str:
@@ -52,6 +58,16 @@ def _require_env_var(name: str, message: str) -> str:
 def _volume_enabled(config: ClusterConfig) -> bool:
     """Report whether the cluster attaches a shared data volume."""
     return config.volumes.create or bool(config.volumes.existing_volume_id.strip())
+
+
+def _new_volume_requested(config: ClusterConfig) -> bool:
+    """Report whether Pulumi will create a new shared data volume."""
+    return config.volumes.create
+
+
+def _netdata_enabled(config: ClusterConfig) -> bool:
+    """Report whether Netdata monitoring is enabled for the cluster."""
+    return config.cluster.monitoring == "netdata"
 
 
 def _here_doc(target_path: str, marker: str, content: str) -> list[str]:
@@ -212,6 +228,82 @@ def _nginx_locations(worker_count: int, monitoring_enabled: bool) -> list[str]:
     return locations
 
 
+def _resolve_netdata_api_key(netdata_api_key: str | None) -> str:
+    """Return the Netdata streaming API key for a single render flow."""
+    return netdata_api_key or str(uuid4())
+
+
+def _netdata_master_stream_content(netdata_api_key: str) -> str:
+    """Render the master-side Netdata streaming accept configuration."""
+    return (
+        "[stream]\n"
+        "    enabled = yes\n"
+        f"    api key = {netdata_api_key}\n"
+        "    allow from = *\n"
+    )
+
+
+def _netdata_hdfs_jmx_content(worker_count: int) -> str:
+    """Render the master-side Netdata HDFS JMX scrape configuration."""
+    lines = [
+        "jobs:",
+        "  - name: namenode",
+        "    url: http://localhost:9870/jmx",
+    ]
+    for index in range(1, worker_count + 1):
+        lines.extend(
+            [
+                f"  - name: datanode-{index:02d}",
+                f"    url: http://worker-{index:02d}:9864/jmx",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _netdata_hdfs_health_content() -> str:
+    """Render HDFS health alarms for Netdata on the master."""
+    return (
+        "alarm: hdfs_capacity_used\n"
+        "on: hdfs.capacity_used\n"
+        "calc: $this\n"
+        "warn: $this > 70\n"
+        "crit: $this > 80\n"
+        "\n"
+        "alarm: hdfs_missing_blocks\n"
+        "on: hdfs.missing_blocks\n"
+        "calc: $this\n"
+        "warn: $this > 0\n"
+        "\n"
+        "alarm: hdfs_dead_nodes\n"
+        "on: hdfs.dead_nodes\n"
+        "calc: $this\n"
+        "warn: $this > 0\n"
+    )
+
+
+def _master_netdata_commands(config: ClusterConfig, netdata_api_key: str) -> list[str]:
+    """Render master-side Netdata configuration commands."""
+    if not _netdata_enabled(config):
+        return []
+    return [
+        *_here_doc(
+            NETDATA_STREAM_PATH,
+            "EOF_NETDATA_STREAM",
+            _netdata_master_stream_content(netdata_api_key),
+        ),
+        *_here_doc(
+            f"{NETDATA_GO_D_PATH}/hdfs.conf",
+            "EOF_NETDATA_HDFS_JMX",
+            _netdata_hdfs_jmx_content(config.cluster.num_workers),
+        ),
+        *_here_doc(
+            f"{NETDATA_HEALTH_D_PATH}/hdfs.conf",
+            "EOF_NETDATA_HDFS_HEALTH",
+            _netdata_hdfs_health_content(),
+        ),
+    ]
+
+
 def _nginx_config_content(config: ClusterConfig) -> str:
     """Render the dedicated nginx site configuration for the master."""
     locations = _nginx_locations(
@@ -241,12 +333,12 @@ def _service_commands(config: ClusterConfig) -> list[str]:
         "mapred-history",
         "spark-master",
         "spark-history-server",
-        "jupyter-lab",
+        "hailstack-jupyterlab",
         "nginx",
     ]
     if _volume_enabled(config):
         services.append("nfs-server")
-    if config.cluster.monitoring == "netdata":
+    if _netdata_enabled(config):
         services.append("netdata")
     return [f"systemctl enable {service}" for service in services]
 
@@ -254,7 +346,7 @@ def _service_commands(config: ClusterConfig) -> list[str]:
 def _worker_service_commands(config: ClusterConfig) -> list[str]:
     """Render systemd enable commands for worker services."""
     services = ["hdfs-datanode", "yarn-nm", "spark-worker"]
-    if config.cluster.monitoring == "netdata":
+    if _netdata_enabled(config):
         services.append("netdata")
     return [f"systemctl enable {service}" for service in services]
 
@@ -296,7 +388,14 @@ def _extras_commands(config: ClusterConfig) -> list[str]:
         packages = " ".join(config.extras.python_packages)
         commands.extend(
             [
-                f"uv venv {OVERLAY_VENV_PATH}",
+                f"{BASE_VENV_PATH}/bin/python -m venv --system-site-packages "
+                f"{OVERLAY_VENV_PATH}",
+                f'BASE_PURELIB=$({BASE_VENV_PATH}/bin/python -c "import '
+                "sysconfig; print(sysconfig.get_path('purelib'))\")",
+                f'OVERLAY_PURELIB=$({OVERLAY_VENV_PATH}/bin/python -c "import '
+                "sysconfig; print(sysconfig.get_path('purelib'))\")",
+                'printf "%s\\n" "$BASE_PURELIB" > '
+                '"$OVERLAY_PURELIB/hailstack-base-venv.pth"',
                 f"uv pip install --python {OVERLAY_VENV_PATH}/bin/python {packages}",
             ]
         )
@@ -322,24 +421,42 @@ def _volume_commands(config: ClusterConfig, volume_password: str | None) -> list
         return []
     assert volume_password is not None
     data_path = f"/home/{config.cluster.ssh_username}/data"
-    return [
+    commands = [
         "install -d -m 0755 /etc/hailstack",
         *_here_doc(VOLUME_KEY_PATH, "EOF_VOLUME_KEY", volume_password + "\n"),
         f"chmod 600 {VOLUME_KEY_PATH}",
-        f"cryptsetup luksFormat /dev/vdb {VOLUME_KEY_PATH} --batch-mode",
-        f"cryptsetup open /dev/vdb hailstack-data --key-file {VOLUME_KEY_PATH}",
-        "mkfs.ext4 /dev/mapper/hailstack-data",
-        f"install -d -m 0755 {data_path}",
-        f"mountpoint -q {data_path} || mount /dev/mapper/hailstack-data {data_path}",
-        "echo '/dev/mapper/hailstack-data "
-        + data_path
-        + " ext4 defaults,nofail 0 2' >> /etc/fstab",
-        "echo '"
-        + data_path
-        + " *(rw,sync,no_subtree_check,no_root_squash)'"
-        + " > /etc/exports.d/hailstack.exports",
-        "exportfs -ra",
     ]
+    if _new_volume_requested(config):
+        commands.append(
+            "cryptsetup isLuks /dev/vdb "
+            + f"|| cryptsetup luksFormat /dev/vdb {VOLUME_KEY_PATH} --batch-mode"
+        )
+    commands.append(
+        f"cryptsetup open /dev/vdb hailstack-data --key-file {VOLUME_KEY_PATH}"
+    )
+    if _new_volume_requested(config):
+        commands.append(
+            "blkid /dev/mapper/hailstack-data >/dev/null 2>&1 "
+            + "|| mkfs.ext4 /dev/mapper/hailstack-data"
+        )
+    commands.extend(
+        [
+            f"install -d -m 0755 {data_path}",
+            "mountpoint -q "
+            + data_path
+            + " || mount /dev/mapper/hailstack-data "
+            + data_path,
+            "echo '/dev/mapper/hailstack-data "
+            + data_path
+            + " ext4 defaults,nofail 0 2' >> /etc/fstab",
+            "echo '"
+            + data_path
+            + " *(rw,sync,no_subtree_check,no_root_squash)'"
+            + " > /etc/exports.d/hailstack.exports",
+            "exportfs -ra",
+        ]
+    )
+    return commands
 
 
 def _lustre_commands(config: ClusterConfig) -> list[str]:
@@ -373,24 +490,56 @@ def _worker_volume_commands(config: ClusterConfig, master_ip: str) -> list[str]:
     ]
 
 
-def _worker_netdata_commands(config: ClusterConfig) -> list[str]:
+def _worker_netdata_commands(
+    config: ClusterConfig,
+    master_ip: str,
+    netdata_api_key: str,
+) -> list[str]:
     """Render worker-side Netdata streaming config commands."""
-    if config.cluster.monitoring != "netdata":
+    if not _netdata_enabled(config):
         return []
     return _here_doc(
-        "/etc/netdata/stream.conf",
+        NETDATA_STREAM_PATH,
         "EOF_NETDATA_STREAM",
         "[stream]\n"
         "    enabled = yes\n"
-        "    destination = master:19999\n"
-        "    api key = hailstack-stream\n",
+        f"    destination = {master_ip}:19999\n"
+        f"    api key = {netdata_api_key}\n",
     )
+
+
+def _worker_install_directories(config: ClusterConfig) -> str:
+    """Render worker install directories, omitting Netdata paths when disabled."""
+    directories = [HADOOP_CONF_DIR, SPARK_CONF_DIR]
+    if _netdata_enabled(config):
+        directories.insert(0, NETDATA_DIR)
+    return "install -d -m 0755 " + " ".join(directories)
+
+
+def _master_install_directories(config: ClusterConfig) -> str:
+    """Render master install directories.
+
+    Include Netdata config paths only when monitoring is enabled.
+    """
+    directories = [
+        "/etc/nginx/sites-enabled",
+        "/etc/nginx/ssl",
+        HADOOP_CONF_DIR,
+        SPARK_CONF_DIR,
+        "/etc/jupyter",
+        "/etc/exports.d",
+    ]
+    if _netdata_enabled(config):
+        directories.extend(
+            [NETDATA_DIR, NETDATA_GO_D_PATH, NETDATA_HEALTH_D_PATH])
+    return "install -d -m 0755 " + " ".join(directories)
 
 
 def generate_master_cloud_init(
     config: ClusterConfig,
     bundle: Bundle,
     worker_ips: list[str],
+    netdata_api_key: str | None = None,
 ) -> str:
     """Return cloud-init user-data bash script for the master."""
     web_password = _require_env_var(
@@ -401,16 +550,16 @@ def generate_master_cloud_init(
     if _volume_enabled(config):
         volume_password = _require_env_var(
             "HAILSTACK_VOLUME_PASSWORD",
-            "HAILSTACK_VOLUME_PASSWORD required when volumes.create=true",
+            "HAILSTACK_VOLUME_PASSWORD required when a data volume is attached",
         )
+    resolved_netdata_api_key = _resolve_netdata_api_key(netdata_api_key)
 
     username = config.cluster.ssh_username
     commands = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         f"# Hailstack bundle {bundle.id}",
-        "install -d -m 0755 /etc/nginx/sites-enabled /etc/nginx/ssl "
-        + f"{HADOOP_CONF_DIR} {SPARK_CONF_DIR} /etc/jupyter /etc/exports.d",
+        _master_install_directories(config),
         f"install -d -m 0700 /home/{username}/.ssh",
         *_here_doc("/etc/hosts", "EOF_HOSTS",
                    _hosts_content(config, worker_ips)),
@@ -446,6 +595,7 @@ def generate_master_cloud_init(
         f"-keyout {SSL_KEY_PATH} -out {SSL_CERT_PATH} -subj '/CN=hailstack'",
         *_here_doc(NGINX_SITE_PATH, "EOF_NGINX_SITE",
                    _nginx_config_content(config)),
+        *_master_netdata_commands(config, resolved_netdata_api_key),
         *_volume_commands(config, volume_password),
         *_lustre_commands(config),
         *_dns_commands(config),
@@ -461,15 +611,16 @@ def generate_worker_cloud_init(
     master_ip: str,
     worker_index: int,
     worker_ips: Sequence[str] | None = None,
+    netdata_api_key: str | None = None,
 ) -> str:
     """Return cloud-init user-data bash script for a worker."""
+    resolved_netdata_api_key = _resolve_netdata_api_key(netdata_api_key)
     username = config.cluster.ssh_username
     commands = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         f"# Hailstack bundle {bundle.id}",
-        "install -d -m 0755 /etc/netdata " +
-        f"{HADOOP_CONF_DIR} {SPARK_CONF_DIR}",
+        _worker_install_directories(config),
         f"install -d -m 0700 /home/{username}/.ssh",
         *_here_doc(
             "/etc/hosts",
@@ -499,7 +650,7 @@ def generate_worker_cloud_init(
             _spark_defaults_content(config, bundle),
         ),
         *_worker_spark_commands(),
-        *_worker_netdata_commands(config),
+        *_worker_netdata_commands(config, master_ip, resolved_netdata_api_key),
         *_worker_volume_commands(config, master_ip),
         *_lustre_commands(config),
         *_dns_commands(config),

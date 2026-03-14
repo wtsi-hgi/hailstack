@@ -439,12 +439,16 @@ def test_repo_packer_scripts_are_executable_and_embed_version_checks() -> None:
         ],
         "ubuntu/hail.sh": ['grep -F "$HAIL_VERSION"'],
         "ubuntu/jupyter.sh": [
-            "jupyter lab --version",
+            'grep -F "$JUPYTER_VERSION"',
             "hailstack-jupyterlab.service",
         ],
         "ubuntu/gnomad.sh": ['grep -F "$GNOMAD_VERSION"'],
-        "ubuntu/uv.sh": ["uv --version"],
-        "ubuntu/netdata.sh": ["netdata.service", "systemctl enable netdata.service"],
+        "ubuntu/uv.sh": ['grep -F "$UV_VERSION"'],
+        "ubuntu/netdata.sh": [
+            'grep -F "$NETDATA_VERSION"',
+            "netdata.service",
+            "systemctl enable netdata.service",
+        ],
     }
 
     for relative_path, tokens in expected_checks.items():
