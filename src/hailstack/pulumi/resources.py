@@ -83,8 +83,7 @@ def create_cluster_resources(
             )
     tags = [cluster_name]
     main_network_id = _lookup_network_id(config.cluster.network_name)
-    lustre_network_id = _lookup_optional_network_id(
-        config.cluster.lustre_network)
+    lustre_network_id = _lookup_optional_network_id(config.cluster.lustre_network)
 
     keypair_name = f"{cluster_name}-keypair"
     keypair = Keypair(
@@ -173,8 +172,7 @@ def create_cluster_resources(
                 [worker_security_group.id],
                 tags,
             )
-            worker_network.append(
-                InstanceNetworkArgs(port=worker_lustre_port.id))
+            worker_network.append(InstanceNetworkArgs(port=worker_lustre_port.id))
 
     master_name = f"{cluster_name}-master"
     worker_names = [
@@ -216,8 +214,7 @@ def create_cluster_resources(
                 bundle,
                 resolved_inputs[0],
                 shared_netdata_api_key,
-                attached_volume_id=_resolved_attached_volume_id(
-                    resolved_inputs[1]),
+                attached_volume_id=_resolved_attached_volume_id(resolved_inputs[1]),
                 allow_missing_runtime_secrets=allow_missing_runtime_secrets,
             )
         ),
@@ -286,13 +283,11 @@ def create_cluster_resources(
         ),
     }
     if (attached_volume_id := _attached_volume_id(config, volume)) is not None:
-        outputs["attached_volume_id"] = pulumi.Output.from_input(
-            attached_volume_id)
+        outputs["attached_volume_id"] = pulumi.Output.from_input(attached_volume_id)
     if (
         attached_volume_name := _attached_volume_name(config, cluster_name)
     ) is not None:
-        outputs["attached_volume_name"] = pulumi.Output.from_input(
-            attached_volume_name)
+        outputs["attached_volume_name"] = pulumi.Output.from_input(attached_volume_name)
     for name, value in outputs.items():
         pulumi.export(name, value)
 
@@ -406,8 +401,7 @@ def _create_master_floating_ip(
             port_id=master_port.id,
             opts=pulumi.ResourceOptions(
                 aliases=[
-                    pulumi.Alias(
-                        type_="openstack:networking/floatingIp:FloatingIp")
+                    pulumi.Alias(type_="openstack:networking/floatingIp:FloatingIp")
                 ]
             ),
         )
@@ -577,8 +571,7 @@ def _resolved_ip_list(values: Sequence[object]) -> list[str]:
     resolved_values: list[str] = []
     for value in values:
         if not isinstance(value, str):
-            raise PulumiError(
-                "Expected resolved fixed IP values to be strings")
+            raise PulumiError("Expected resolved fixed IP values to be strings")
         resolved_values.append(value)
     return resolved_values
 

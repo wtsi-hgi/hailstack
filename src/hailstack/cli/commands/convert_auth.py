@@ -23,8 +23,10 @@
 
 """Convert-auth command for the hailstack CLI."""
 
+import logging
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -33,6 +35,18 @@ import typer
 import yaml
 
 from hailstack.errors import ConfigError
+
+
+def get_convert_auth_logger() -> logging.Logger:
+    """Return a dedicated stderr logger for convert-auth progress messages."""
+    logger = logging.getLogger("hailstack.convert-auth")
+    logger.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return logger
 
 
 def _require_env_var(name: str) -> str:
@@ -99,6 +113,7 @@ def _backup_existing_clouds_yaml(clouds_yaml_path: Path) -> None:
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     backup_path = clouds_yaml_path.with_name(f"clouds.yaml.bak.{timestamp}")
     shutil.copy2(clouds_yaml_path, backup_path)
+    backup_path.chmod(0o600)
 
 
 def _write_clouds_yaml(yaml_output: str) -> None:
@@ -108,19 +123,26 @@ def _write_clouds_yaml(yaml_output: str) -> None:
     if clouds_yaml_path.exists():
         _backup_existing_clouds_yaml(clouds_yaml_path)
     clouds_yaml_path.write_text(yaml_output, encoding="utf-8")
+    clouds_yaml_path.chmod(0o600)
 
 
 def convert_auth_command(
     write: Annotated[
         bool,
-        typer.Option("--write", help="Write to ~/.config/openstack/clouds.yaml."),
+        typer.Option(
+            "--write", help="Write to ~/.config/openstack/clouds.yaml."),
     ] = False,
 ) -> None:
     """Convert openrc.sh env vars to clouds.yaml format."""
+    logger = get_convert_auth_logger()
+    logger.info("reading OpenStack environment")
     yaml_output = _render_clouds_yaml()
+    logger.info("clouds.yaml generated")
     if write:
         _write_clouds_yaml(yaml_output)
+        logger.info("clouds.yaml written")
+        return
     typer.echo(yaml_output, nl=False)
 
 
-__all__ = ["convert_auth_command"]
+__all__ = ["convert_auth_command", "get_convert_auth_logger"]

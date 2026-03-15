@@ -62,7 +62,7 @@ Test conventions in this repo:
 
 ## Building Apptainer Image
 
-The checked-in definition stages the repo into `/opt/hailstack`, installs Pulumi and Packer, installs Ansible with `pip`, and then installs Hailstack in editable mode.
+The checked-in definition stages the repo into `/opt/hailstack`, installs Pulumi and Packer, installs Ansible with `pip`, and then installs Hailstack as a regular `pip` package install (not in editable mode).
 
 To match the release workflow exactly:
 

@@ -47,6 +47,7 @@ type Clock = Callable[[], float]
 
 _REBOOT_TIMEOUT_SECONDS = 300.0
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_SSH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 _SSH_HOST_KEY_OPTIONS = (
     "-o",
     "StrictHostKeyChecking=no",
@@ -282,16 +283,31 @@ class SSHRebootExecutor:
         ssh_key_path: Path | None,
     ) -> str:
         """Run one SSH command and return stdout or raise on failure."""
-        result = self._run_ssh_subprocess(
-            target,
-            ssh_username,
-            command,
-            ssh_key_path=ssh_key_path,
-        )
-        if result.returncode != 0:
+        for attempt, backoff_seconds in enumerate((0.0, *_SSH_RETRY_BACKOFF_SECONDS)):
+            if attempt > 0:
+                self._sleeper(backoff_seconds)
+            try:
+                result = self._run_ssh_subprocess(
+                    target,
+                    ssh_username,
+                    command,
+                    ssh_key_path=ssh_key_path,
+                )
+            except subprocess.TimeoutExpired:
+                if attempt < len(_SSH_RETRY_BACKOFF_SECONDS):
+                    continue
+                raise SSHError(
+                    f"SSH command timed out for {target.name}") from None
+            if result.returncode == 0:
+                return result.stdout
             stderr = result.stderr.strip()
+            if _looks_like_ssh_transport_error(stderr) and attempt < len(
+                _SSH_RETRY_BACKOFF_SECONDS
+            ):
+                continue
             raise SSHError(stderr or f"SSH command failed for {target.name}")
-        return result.stdout
+
+        raise AssertionError("SSH retry loop exhausted unexpectedly")
 
     def _run_ssh_command(
         self,
@@ -304,28 +320,37 @@ class SSHRebootExecutor:
         ssh_key_path: Path | None = None,
     ) -> bool:
         """Run one SSH command and either raise or report transport failures."""
-        try:
-            result = self._run_ssh_subprocess(
-                target,
-                ssh_username,
-                command,
-                ssh_key_path=ssh_key_path,
-            )
-        except subprocess.TimeoutExpired:
-            if treat_transport_error_as_unreachable:
-                return False
-            raise SSHError(f"SSH command timed out for {target.name}") from None
+        for attempt, backoff_seconds in enumerate((0.0, *_SSH_RETRY_BACKOFF_SECONDS)):
+            if attempt > 0:
+                self._sleeper(backoff_seconds)
+            try:
+                result = self._run_ssh_subprocess(
+                    target,
+                    ssh_username,
+                    command,
+                    ssh_key_path=ssh_key_path,
+                )
+            except subprocess.TimeoutExpired:
+                if attempt < len(_SSH_RETRY_BACKOFF_SECONDS):
+                    continue
+                if treat_transport_error_as_unreachable:
+                    return False
+                raise SSHError(
+                    f"SSH command timed out for {target.name}") from None
 
-        stderr = result.stderr.strip()
-        if result.returncode == 0:
-            return True
-        if allow_remote_close_as_success and _looks_like_reboot_disconnect(stderr):
-            return True
-        if treat_transport_error_as_unreachable and _looks_like_ssh_transport_error(
-            stderr
-        ):
-            return False
-        raise SSHError(stderr or f"SSH command failed for {target.name}")
+            stderr = result.stderr.strip()
+            if result.returncode == 0:
+                return True
+            if allow_remote_close_as_success and _looks_like_reboot_disconnect(stderr):
+                return True
+            if _looks_like_ssh_transport_error(stderr):
+                if attempt < len(_SSH_RETRY_BACKOFF_SECONDS):
+                    continue
+                if treat_transport_error_as_unreachable:
+                    return False
+            raise SSHError(stderr or f"SSH command failed for {target.name}")
+
+        raise AssertionError("SSH retry loop exhausted unexpectedly")
 
     def _run_ssh_subprocess(
         self,
@@ -348,7 +373,8 @@ class SSHRebootExecutor:
             if ssh_key_path is not None:
                 ssh_command.extend(["-i", str(ssh_key_path)])
             if target.jump_host:
-                ssh_command.extend(["-J", f"{ssh_username}@{target.jump_host}"])
+                ssh_command.extend(
+                    ["-J", f"{ssh_username}@{target.jump_host}"])
             ssh_command.extend([f"{ssh_username}@{target.host}", *command])
             return subprocess.run(
                 ssh_command,
@@ -364,10 +390,10 @@ class SSHRebootExecutor:
 def get_reboot_logger() -> logging.Logger:
     """Return a dedicated stderr logger for reboot progress messages."""
     logger = logging.getLogger("hailstack.reboot")
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
+    logger.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
     return logger
@@ -384,10 +410,30 @@ def create_reboot_executor(logger: logging.Logger) -> RebootExecutor:
 
 
 def reboot_command(
-    config: Annotated[str, typer.Option("--config")] = "./hailstack.toml",
-    node: Annotated[str | None, typer.Option("--node")] = None,
-    ssh_key: Annotated[str | None, typer.Option("--ssh-key")] = None,
-    dotenv: Annotated[str | None, typer.Option("--dotenv")] = None,
+    config: Annotated[
+        str,
+        typer.Option(
+            "--config", help="Path to cluster configuration TOML file."),
+    ] = "./hailstack.toml",
+    node: Annotated[
+        str | None,
+        typer.Option(
+            "--node", help="Reboot a single worker by short or full name."),
+    ] = None,
+    ssh_key: Annotated[
+        str | None,
+        typer.Option(
+            "--ssh-key",
+            help="Path to the SSH private key for cluster access.",
+        ),
+    ] = None,
+    dotenv: Annotated[
+        str | None,
+        typer.Option(
+            "--dotenv",
+            help="Load environment variables from a .env file before parsing config.",
+        ),
+    ] = None,
 ) -> None:
     """Reboot worker nodes."""
     logger = get_reboot_logger()
@@ -395,15 +441,18 @@ def reboot_command(
         Path(config),
         dotenv_file=Path(dotenv) if dotenv is not None else None,
     )
+    logger.info("config loaded")
     stack_runner = create_reboot_stack_runner(logger)
     executor = create_reboot_executor(logger)
     outputs = stack_runner.get_reboot_outputs(loaded_config)
+    logger.info("stack outputs resolved")
     inventory = _resolve_inventory(outputs, loaded_config.cluster.name)
     targets = _select_targets(
         inventory,
         cluster_name=loaded_config.cluster.name,
         requested_node=node,
     )
+    logger.info("rebooting %d worker(s)", len(targets))
     executor.reboot_nodes(
         targets,
         ssh_username=loaded_config.cluster.ssh_username,
@@ -411,6 +460,7 @@ def reboot_command(
         timeout_seconds=_REBOOT_TIMEOUT_SECONDS,
         backoff_seconds=_RETRY_BACKOFF_SECONDS,
     )
+    logger.info("reboot complete")
 
 
 def _resolve_inventory(
@@ -448,7 +498,8 @@ def _optional_output_str(outputs: Mapping[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(
+            f"Pulumi stack output '{key}' was missing or invalid")
     return value
 
 
@@ -464,7 +515,8 @@ def _select_targets(
 
     candidate = requested_node.strip()
     if _is_master_reference(candidate, cluster_name):
-        raise typer.BadParameter("Cannot reboot master node", param_hint="--node")
+        raise typer.BadParameter(
+            "Cannot reboot master node", param_hint="--node")
 
     for target in inventory:
         if _matches_target(target, candidate, cluster_name=cluster_name):
@@ -484,7 +536,8 @@ def _require_output_str(
     if value is None:
         value = default
     if not isinstance(value, str) or not value.strip():
-        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(
+            f"Pulumi stack output '{key}' was missing or invalid")
     return value.strip()
 
 
@@ -492,13 +545,15 @@ def _require_output_str_list(outputs: Mapping[str, object], key: str) -> list[st
     """Extract a list of non-empty strings from stack outputs."""
     value = outputs.get(key)
     if not isinstance(value, list):
-        raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
+        raise PulumiError(
+            f"Pulumi stack output '{key}' was missing or invalid")
 
     items = cast(list[object], value)
     strings: list[str] = []
     for item in items:
         if not isinstance(item, str) or not item.strip():
-            raise PulumiError(f"Pulumi stack output '{key}' was missing or invalid")
+            raise PulumiError(
+                f"Pulumi stack output '{key}' was missing or invalid")
         strings.append(item.strip())
 
     return strings
@@ -529,7 +584,8 @@ def _is_master_reference(candidate: str, cluster_name: str) -> bool:
     normalized_candidate = candidate.strip().lower()
     cluster_prefix = f"{cluster_name.lower()}-"
     if normalized_candidate.startswith(cluster_prefix):
-        normalized_candidate = normalized_candidate.removeprefix(cluster_prefix)
+        normalized_candidate = normalized_candidate.removeprefix(
+            cluster_prefix)
     return normalized_candidate == "master" or normalized_candidate.startswith(
         "master-"
     )

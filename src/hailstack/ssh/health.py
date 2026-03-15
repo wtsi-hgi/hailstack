@@ -39,6 +39,8 @@ _SSH_HOST_KEY_OPTIONS = (
     "-o",
     "GlobalKnownHostsFile=/dev/null",
 )
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_SSH_COMMAND_TIMEOUT_SECONDS = 10.0
 
 
 class HealthProbeTarget(BaseModel):
@@ -212,38 +214,58 @@ async def _run_ssh_command(
     ssh_key_path: Path | None = None,
 ) -> str:
     """Run one SSH command and return stdout or raise on transport failure."""
-    try:
-        ssh_command = [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            *_SSH_HOST_KEY_OPTIONS,
-        ]
-        if ssh_key_path is not None:
-            ssh_command.extend(["-i", str(ssh_key_path)])
-        if host.jump_host:
-            ssh_command.extend(["-J", f"{ssh_username}@{host.jump_host}"])
-        ssh_command.extend([f"{ssh_username}@{host.address}", *command])
-        process = await asyncio.create_subprocess_exec(
-            *ssh_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as error:
-        raise SSHError("SSH CLI not found") from error
+    for attempt, backoff_seconds in enumerate((0.0, *_RETRY_BACKOFF_SECONDS)):
+        if attempt > 0:
+            await asyncio.sleep(backoff_seconds)
+        try:
+            ssh_command = [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                *_SSH_HOST_KEY_OPTIONS,
+            ]
+            if ssh_key_path is not None:
+                ssh_command.extend(["-i", str(ssh_key_path)])
+            if host.jump_host:
+                ssh_command.extend(["-J", f"{ssh_username}@{host.jump_host}"])
+            ssh_command.extend([f"{ssh_username}@{host.address}", *command])
+            process = await asyncio.create_subprocess_exec(
+                *ssh_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as error:
+            raise SSHError("SSH CLI not found") from error
 
-    stdout_bytes, stderr_bytes = await process.communicate()
-    stdout = stdout_bytes.decode("utf-8")
-    stderr = stderr_bytes.decode("utf-8").strip()
-    if _looks_like_ssh_auth_error(stderr):
-        raise SSHError(stderr or f"SSH authentication failed for {host.address}")
-    if process.returncode == 255 or _looks_like_ssh_transport_error(stderr):
-        raise SSHError(stderr or f"Unable to reach node {host.address}")
-    if process.returncode != 0 and process.returncode not in allowed_returncodes:
-        raise SSHError(stderr or f"SSH command failed for {host.address}")
-    return stdout
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=_SSH_COMMAND_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            if attempt < len(_RETRY_BACKOFF_SECONDS):
+                continue
+            raise SSHError(
+                f"operation timed out while probing {host.address}"
+            ) from None
+        stdout = stdout_bytes.decode("utf-8")
+        stderr = stderr_bytes.decode("utf-8").strip()
+        if _looks_like_ssh_auth_error(stderr):
+            raise SSHError(
+                stderr or f"SSH authentication failed for {host.address}")
+        if process.returncode == 255 or _looks_like_ssh_transport_error(stderr):
+            if attempt < len(_RETRY_BACKOFF_SECONDS):
+                continue
+            raise SSHError(stderr or f"Unable to reach node {host.address}")
+        if process.returncode != 0 and process.returncode not in allowed_returncodes:
+            raise SSHError(stderr or f"SSH command failed for {host.address}")
+        return stdout
+
+    raise AssertionError("SSH retry loop exhausted unexpectedly")
 
 
 def _service_results_from_gather(
@@ -305,7 +327,8 @@ def _parse_percent(value: str, *, host: HealthProbeTarget) -> float:
     try:
         percent = float(value)
     except ValueError as error:
-        raise SSHError(f"Unable to parse resource usage for {host.name}") from error
+        raise SSHError(
+            f"Unable to parse resource usage for {host.name}") from error
     if percent < 0.0 or percent > 100.0:
         raise SSHError(f"Unable to parse resource usage for {host.name}")
     return percent

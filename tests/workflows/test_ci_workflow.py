@@ -87,6 +87,23 @@ def _step_by_name(job_name: str, step_name: str) -> dict[str, object]:
     raise AssertionError(f"{job_name} job must define step '{step_name}'")
 
 
+def test_ci_jobs_pin_packer_setup_and_install_the_requested_version() -> None:
+    """Install a pinned Packer action in every job that exercises repo tooling."""
+    expected_action = "hashicorp/setup-packer@1aa358be5cf73883762b302a3a03abd66e75b232"
+
+    for job_name in ("lint", "typecheck", "test"):
+        packer_step = _step_by_name(job_name, "Set up Packer")
+
+        assert _require_str(packer_step["uses"], context="packer step uses") == (
+            expected_action
+        )
+        with_block = _require_dict(
+            packer_step["with"], context="packer step inputs")
+        assert _require_str(with_block["version"], context="packer version") == (
+            "1.11.2"
+        )
+
+
 def test_ci_workflow_runs_on_push_to_main_and_pull_requests() -> None:
     """Run CI on pushes to main and for all pull requests."""
     workflow = _load_workflow()
@@ -121,10 +138,12 @@ def test_ci_lint_job_runs_ruff_commands_that_fail_on_lint_or_format_errors() -> 
 
 def test_ci_typecheck_job_uses_repo_strict_pyright_configuration() -> None:
     """Run Pyright using the repo's strict pyproject configuration."""
-    typecheck_step = _step_by_name("typecheck", "Run Pyright strict type checks")
+    typecheck_step = _step_by_name(
+        "typecheck", "Run Pyright strict type checks")
     pyproject = _load_pyproject()
     tool_config = _require_dict(pyproject["tool"], context="tool config")
-    pyright_config = _require_dict(tool_config["pyright"], context="pyright config")
+    pyright_config = _require_dict(
+        tool_config["pyright"], context="pyright config")
 
     assert _require_str(typecheck_step["run"], context="typecheck run command") == (
         "uv run pyright"

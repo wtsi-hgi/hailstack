@@ -301,6 +301,97 @@ def test_openstack_optional_show_raises_network_error_for_auth_failures(
         create_module.OpenStackCLIClient().get_network("private-net")
 
 
+def test_openstack_required_show_retries_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry transient OpenStack control-plane failures before succeeding."""
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            return subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="HTTP 503 Service Unavailable",
+            )
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='{"id": "private-net-id"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(create_module, "sleep", sleep_calls.append)
+
+    result = create_module.OpenStackCLIClient().get_network("private-net")
+
+    assert result == {"id": "private-net-id"}
+    assert attempts["count"] == 3
+    assert sleep_calls == [1.0, 2.0]
+
+
+def test_openstack_required_show_raises_network_error_for_invalid_integer_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map malformed numeric fields in OpenStack JSON to NetworkError."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='{"vcpus": "many", "ram": 8192}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+
+    with pytest.raises(NetworkError, match="invalid integer field 'vcpus'"):
+        create_module.OpenStackCLIClient().get_flavour("m2.xlarge")
+
+
+def test_openstack_optional_show_retries_transient_endpoint_lookup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry transient endpoint-discovery failures.
+
+    Do not treat them as missing resources.
+    """
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            return subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="public endpoint for network service in RegionOne not found",
+            )
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='{"id": "private-net-id"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(create_module, "sleep", sleep_calls.append)
+
+    result = create_module.OpenStackCLIClient().get_network("private-net")
+
+    assert result == {"id": "private-net-id"}
+    assert attempts["count"] == 3
+    assert sleep_calls == [1.0, 2.0]
+
+
 def _write_bundles(path: Path) -> Path:
     """Write a temporary compatibility matrix for create tests."""
     path.write_text(
@@ -529,12 +620,12 @@ def test_create_dry_run_does_not_write_pulumi_state(
     assert fake_runner.destroy_calls == 0
 
 
-def test_create_dry_run_falls_back_to_local_preview_when_backend_unavailable(
+def test_create_dry_run_invalid_ceph_s3_credentials_raise_s3_error(
     command_matrix: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Allow first-create dry runs to use the local preview path without backend."""
+    """Surface backend-auth failures for dry-run before preview can start."""
     del command_matrix
     config_path = _write_config(tmp_path / "create.toml")
     fake_runner = FakePulumiRunner(
@@ -547,10 +638,12 @@ def test_create_dry_run_falls_back_to_local_preview_when_backend_unavailable(
     result = runner.invoke(
         app, ["create", "--config", str(config_path), "--dry-run"])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert isinstance(result.exception, S3Error)
+    assert "ceph.example.invalid" in str(result.exception)
     assert fake_runner.checked_backend == 1
     assert fake_runner.stack_exists_calls == 0
-    assert fake_runner.preview_calls == 1
+    assert fake_runner.preview_calls == 0
     assert fake_runner.up_calls == 0
 
 
@@ -584,12 +677,12 @@ def test_create_requires_ceph_s3_credentials_before_pulumi(
     assert fake_runner.checked_backend == 0
 
 
-def test_create_dry_run_allows_local_preview_without_ceph_s3_credentials(
+def test_create_dry_run_requires_ceph_s3_credentials_before_pulumi(
     command_matrix: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Allow first-create dry runs to preview locally without backend secrets."""
+    """Reject missing Ceph S3 state-backend settings for dry-run as well."""
     del command_matrix
     config_path = _write_config(
         tmp_path / "create.toml",
@@ -607,18 +700,22 @@ def test_create_dry_run_allows_local_preview_without_ceph_s3_credentials(
     result = runner.invoke(
         app, ["create", "--config", str(config_path), "--dry-run"])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ConfigError)
+    assert str(result.exception) == (
+        "Ceph S3 credentials required for Pulumi state backend"
+    )
     assert fake_runner.checked_backend == 0
     assert fake_runner.stack_exists_calls == 0
-    assert fake_runner.preview_calls == 1
+    assert fake_runner.preview_calls == 0
 
 
-def test_create_degraded_dry_run_warns_about_backend_independent_blockers(
+def test_create_dry_run_missing_ceph_credentials_fail_before_preflight(
     command_matrix: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Surface first-create blockers even when dry-run must fall back locally."""
+    """Stop before OpenStack preflight when dry-run lacks backend credentials."""
     del command_matrix
     config_path = _write_config(
         tmp_path / "create.toml",
@@ -637,10 +734,12 @@ def test_create_degraded_dry_run_warns_about_backend_independent_blockers(
     result = runner.invoke(
         app, ["create", "--config", str(config_path), "--dry-run"])
 
-    assert result.exit_code == 0
-    assert (
-        "possible backend-independent blocker: floating IP '1.2.3.4'" in result.stderr
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ConfigError)
+    assert str(result.exception) == (
+        "Ceph S3 credentials required for Pulumi state backend"
     )
+    assert fake_runner.checked_backend == 0
 
 
 def test_create_requires_ssh_public_keys_before_pulumi(

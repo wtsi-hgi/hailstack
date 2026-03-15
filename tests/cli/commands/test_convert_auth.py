@@ -23,6 +23,7 @@
 
 """Acceptance tests for the convert-auth CLI command."""
 
+import stat
 from pathlib import Path
 from typing import cast
 
@@ -109,7 +110,31 @@ def test_convert_auth_write_flag_writes_clouds_yaml(
 
     clouds_path = tmp_path / ".config" / "openstack" / "clouds.yaml"
     assert result.exit_code == 0
-    assert clouds_path.read_text(encoding="utf-8") == result.stdout
+    assert result.stdout == ""
+    assert clouds_path.read_text(encoding="utf-8") == (
+        "clouds:\n"
+        "  openstack:\n"
+        "    auth:\n"
+        "      auth_url: https://keystone.example/v3\n"
+        "      project_name: research-project\n"
+        "      username: alice\n"
+    )
+
+
+def test_convert_auth_write_flag_restricts_clouds_yaml_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Write clouds.yaml with owner-only permissions because it may contain secrets."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("OS_PASSWORD", "super-secret")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["convert-auth", "--write"])
+
+    clouds_path = tmp_path / ".config" / "openstack" / "clouds.yaml"
+    assert result.exit_code == 0
+    assert stat.S_IMODE(clouds_path.stat().st_mode) == 0o600
 
 
 def test_convert_auth_write_flag_creates_backup_for_existing_file(
@@ -128,9 +153,34 @@ def test_convert_auth_write_flag_creates_backup_for_existing_file(
 
     backups = sorted(clouds_dir.glob("clouds.yaml.bak.*"))
     assert result.exit_code == 0
+    assert result.stdout == ""
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "old: value\n"
-    assert clouds_path.read_text(encoding="utf-8") == result.stdout
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    assert clouds_path.read_text(encoding="utf-8") == (
+        "clouds:\n"
+        "  openstack:\n"
+        "    auth:\n"
+        "      auth_url: https://keystone.example/v3\n"
+        "      project_name: research-project\n"
+        "      username: alice\n"
+    )
+
+
+def test_convert_auth_write_flag_does_not_echo_credentials_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Avoid writing generated credentials back to stdout when persisting them."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("OS_PASSWORD", "super-secret")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["convert-auth", "--write"])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "super-secret" not in result.stdout
 
 
 def test_convert_auth_output_contains_all_provided_env_vars(
@@ -179,3 +229,16 @@ def test_convert_auth_omits_password_when_not_set(
 
     assert result.exit_code == 0
     assert "password:" not in result.stdout
+
+
+def test_convert_auth_logs_major_command_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Log command progress to stderr while generating clouds.yaml."""
+    _set_required_env(monkeypatch)
+
+    result = runner.invoke(app, ["convert-auth"])
+
+    assert result.exit_code == 0
+    assert "reading OpenStack environment" in result.stderr
+    assert "clouds.yaml generated" in result.stderr

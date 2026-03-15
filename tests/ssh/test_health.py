@@ -53,7 +53,8 @@ def test_check_service_health_reports_active_service(
         assert allowed_returncodes == (3,)
         return "active\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command",
+                        fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -64,7 +65,8 @@ def test_check_service_health_reports_active_service(
     )
 
     assert result == [
-        health_module.ServiceStatus(name="spark-master", active=True, node="master")
+        health_module.ServiceStatus(
+            name="spark-master", active=True, node="master")
     ]
 
 
@@ -89,7 +91,8 @@ def test_check_service_health_reports_inactive_service(
         assert allowed_returncodes == (3,)
         return "inactive\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command",
+                        fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -100,7 +103,8 @@ def test_check_service_health_reports_inactive_service(
     )
 
     assert result == [
-        health_module.ServiceStatus(name="spark-master", active=False, node="master")
+        health_module.ServiceStatus(
+            name="spark-master", active=False, node="master")
     ]
 
 
@@ -123,7 +127,8 @@ def test_check_service_health_surfaces_unreachable_host_and_continues(
             raise SSHError("Unable to reach node worker-01")
         return "active\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command",
+                        fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.check_service_health(
@@ -170,7 +175,8 @@ def test_gather_resource_usage_returns_float_percentages(
         )
         return "23\n45.5\n12\n"
 
-    monkeypatch.setattr(health_module, "_run_ssh_command", fake_run_ssh_command)
+    monkeypatch.setattr(health_module, "_run_ssh_command",
+                        fake_run_ssh_command)
 
     result = asyncio.run(
         health_module.gather_resource_usage(
@@ -212,8 +218,9 @@ def test_run_ssh_command_surfaces_auth_failures_without_relabeling_transport(
 
     with pytest.raises(SSHError, match="Permission denied"):
         asyncio.run(
-            health_module._run_ssh_command(
-                health_module.HealthProbeTarget(name="master", address="master"),
+            health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+                health_module.HealthProbeTarget(
+                    name="master", address="master"),
                 "ubuntu",
                 ("true",),
             )
@@ -249,7 +256,7 @@ def test_run_ssh_command_passes_explicit_ssh_key(
     ssh_key_path.write_text("PRIVATE KEY", encoding="utf-8")
 
     result = asyncio.run(
-        health_module._run_ssh_command(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
             health_module.HealthProbeTarget(name="master", address="master"),
             "ubuntu",
             ("true",),
@@ -295,7 +302,7 @@ def test_run_ssh_command_allows_expected_non_zero_exit_codes(
     )
 
     result = asyncio.run(
-        health_module._run_ssh_command(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
             health_module.HealthProbeTarget(name="master", address="master"),
             "ubuntu",
             ("systemctl", "is-active", "spark-master"),
@@ -304,3 +311,102 @@ def test_run_ssh_command_allows_expected_non_zero_exit_codes(
     )
 
     assert result == "inactive\n"
+
+
+def test_run_ssh_command_retries_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry transient SSH transport failures before succeeding."""
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    class FakeProcess:
+        def __init__(self, returncode: int, stdout: bytes, stderr: bytes) -> None:
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self._stdout, self._stderr
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            return FakeProcess(255, b"", b"Connection timed out")
+        return FakeProcess(0, b"ok\n", b"")
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(health_module.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(name="master", address="master"),
+            "ubuntu",
+            ("true",),
+        )
+    )
+
+    assert result == "ok\n"
+    assert attempts["count"] == 3
+    assert sleep_calls == [1.0, 2.0]
+
+
+def test_run_ssh_command_retries_timed_out_remote_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry timed out SSH commands instead of hanging detailed health checks."""
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+    killed_processes: list[int] = []
+
+    class FakeProcess:
+        def __init__(self, attempt: int) -> None:
+            self._attempt = attempt
+            self.returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self._attempt == 1:
+                raise TimeoutError()
+            return b"ok\n", b""
+
+        def kill(self) -> None:
+            killed_processes.append(self._attempt)
+
+        async def wait(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        attempts["count"] += 1
+        return FakeProcess(attempts["count"])
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(health_module.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(name="master", address="master"),
+            "ubuntu",
+            ("true",),
+        )
+    )
+
+    assert result == "ok\n"
+    assert attempts["count"] == 2
+    assert killed_processes == [1]
+    assert sleep_calls == [1.0]

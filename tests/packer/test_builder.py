@@ -24,6 +24,7 @@
 """Acceptance tests for packer image building."""
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -487,6 +488,9 @@ def test_repo_packer_scripts_do_not_embed_cluster_specific_or_secret_values() ->
 
 def test_e2_packer_template_validates_with_packer_cli() -> None:
     """Validate the checked-in HCL template with the local Packer CLI."""
+    if shutil.which("packer") is None:
+        pytest.skip("packer CLI not installed")
+
     result = subprocess.run(
         ["packer", "validate", "-syntax-only", str(PACKER_TEMPLATE_PATH)],
         capture_output=True,

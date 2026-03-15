@@ -216,12 +216,14 @@ Options:
 | --- | --- |
 | `--config PATH` | Path to the cluster configuration TOML file. Defaults to `./hailstack.toml`. |
 | `--node TEXT` | Optional worker name selector. If omitted, all workers are rebooted. The master cannot be rebooted through this command. |
+| `--ssh-key PATH` | SSH private key path. If omitted, the command relies on your SSH agent. |
 | `--dotenv PATH` | Load environment variables from a `.env` file before parsing the config. |
 
 Examples:
 
 ```bash
 hailstack reboot --config my-cluster.toml --dotenv .env
+hailstack reboot --config my-cluster.toml --dotenv .env --ssh-key ~/.ssh/my-cluster-key
 hailstack reboot --config my-cluster.toml --dotenv .env --node my-cluster-worker-02
 ```
 
@@ -295,13 +297,15 @@ Options:
 
 | Option | Meaning |
 | --- | --- |
-| `--write` | Write the generated YAML to `~/.config/openstack/clouds.yaml`, backing up any existing file as `clouds.yaml.bak.<timestamp>`. |
+| `--write` | Write the generated YAML to `~/.config/openstack/clouds.yaml`, backing up any existing file as `clouds.yaml.bak.<timestamp>`, without echoing credentials to stdout. |
 
 Examples:
 
 ```bash
 hailstack convert-auth
+# prints the generated YAML to stdout
 hailstack convert-auth --write
+# writes ~/.config/openstack/clouds.yaml only
 ```
 
 ## Compatibility Bundles

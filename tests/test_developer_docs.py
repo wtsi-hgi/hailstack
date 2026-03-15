@@ -29,6 +29,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONTRIBUTING_PATH = REPOSITORY_ROOT / "CONTRIBUTING.md"
 AI_PATH = REPOSITORY_ROOT / "AI.md"
+README_PATH = REPOSITORY_ROOT / "README.md"
 ERRORS_PATH = REPOSITORY_ROOT / "src" / "hailstack" / "errors.py"
 
 CONTRIBUTING_SECTIONS = (
@@ -61,6 +62,7 @@ CONTRIBUTING_REQUIRED_SNIPPETS = (
     "fixtures",
     "parametrization",
     "hailstack build-image --config <config.toml> --bundle <bundle-id>",
+    "not in editable mode",
     "Submit a PR",
     "Pulumi is used instead of Terraform",
     "Ceph S3",
@@ -133,6 +135,18 @@ def test_contributing_covers_required_workflows_and_architecture_rationale() -> 
 
     for snippet in CONTRIBUTING_REQUIRED_SNIPPETS:
         assert snippet in contributing_text
+
+
+def test_readme_reboot_section_documents_explicit_ssh_key_usage() -> None:
+    """Keep README reboot docs aligned with the CLI's SSH key support."""
+    readme_text = _read(README_PATH)
+
+    assert "### `hailstack reboot`" in readme_text
+    assert "| `--ssh-key PATH` | SSH private key path." in readme_text
+    assert (
+        "hailstack reboot --config my-cluster.toml --dotenv .env --ssh-key "
+        "~/.ssh/my-cluster-key"
+    ) in readme_text
 
 
 def test_ai_covers_required_conventions_and_common_tasks() -> None:

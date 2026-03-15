@@ -103,8 +103,7 @@ class RecordingMocks(pulumi.runtime.Mocks):
             state.setdefault("all_fixed_ips", [self._ip_for_name(args.name)])
 
         if args.typ == "openstack:networking/floatingIp:FloatingIp":
-            state.setdefault(
-                "address", f"203.0.113.{self._next_floating_ip_octet}")
+            state.setdefault("address", f"203.0.113.{self._next_floating_ip_octet}")
             self._next_floating_ip_octet += 1
 
         resource_id = f"{args.name}-id"
@@ -233,8 +232,7 @@ def _drain_resource_registrations(
     for _ in range(50):
         loop.run_until_complete(asyncio.sleep(0.01))
         current_count = len(mocks.resources)
-        pending_tasks = [task for task in asyncio.all_tasks(
-            loop) if not task.done()]
+        pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
         if current_count == previous_count and not pending_tasks:
             stable_iterations += 1
             if stable_iterations >= 2:
@@ -334,8 +332,7 @@ def test_master_ssh_toggle_creates_tcp_22_rule(monkeypatch: pytest.MonkeyPatch) 
     """Create a master ingress rule for SSH when enabled."""
     mocks, _, _ = _run_stack(_config(), monkeypatch)
 
-    rules = _resource_inputs(
-        mocks, "openstack:networking/secGroupRule:SecGroupRule")
+    rules = _resource_inputs(mocks, "openstack:networking/secGroupRule:SecGroupRule")
 
     assert any(
         rule["port_range_min"] == 22
@@ -365,8 +362,7 @@ def test_master_netdata_toggle_false_skips_port_19999(
     )
 
     mocks, _, _ = _run_stack(config, monkeypatch)
-    rules = _resource_inputs(
-        mocks, "openstack:networking/secGroupRule:SecGroupRule")
+    rules = _resource_inputs(mocks, "openstack:networking/secGroupRule:SecGroupRule")
 
     assert not any(rule.get("port_range_min") == 19999 for rule in rules)
 
@@ -390,8 +386,7 @@ def test_monitoring_none_disables_default_netdata_port_exposure(
     )
 
     mocks, _, _ = _run_stack(config, monkeypatch)
-    rules = _resource_inputs(
-        mocks, "openstack:networking/secGroupRule:SecGroupRule")
+    rules = _resource_inputs(mocks, "openstack:networking/secGroupRule:SecGroupRule")
 
     assert not any(rule.get("port_range_min") == 19999 for rule in rules)
 
@@ -402,8 +397,7 @@ def test_master_allows_all_tcp_from_worker_group(
     """Always allow all TCP from the worker security group into the master SG."""
     mocks, _, _ = _run_stack(_config(), monkeypatch)
 
-    rules = _resource_inputs(
-        mocks, "openstack:networking/secGroupRule:SecGroupRule")
+    rules = _resource_inputs(mocks, "openstack:networking/secGroupRule:SecGroupRule")
 
     assert any(
         rule["port_range_min"] == 1
@@ -418,8 +412,7 @@ def test_volume_creation_attaches_requested_size_to_master(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Create a cluster-tagged Cinder volume and attach it to the master."""
-    config = _config(
-        volumes={"create": True, "name": "my-data-vol", "size_gb": 500})
+    config = _config(volumes={"create": True, "name": "my-data-vol", "size_gb": 500})
 
     mocks, _, _ = _run_stack(config, monkeypatch)
     volumes = _resource_inputs(mocks, "openstack:blockstorage/volume:Volume")
@@ -464,8 +457,7 @@ def test_existing_volume_id_attaches_without_creating_volume(
 
     def fail_if_volume_created(*args: object, **kwargs: object) -> Never:
         del args, kwargs
-        raise AssertionError(
-            "Volume() should not be called for existing_volume_id")
+        raise AssertionError("Volume() should not be called for existing_volume_id")
 
     monkeypatch.setattr(resources_module, "Volume", fail_if_volume_created)
     monkeypatch.setattr(resources_module, "VolumeAttach", FakeVolumeAttach)
@@ -503,8 +495,7 @@ def test_whitespace_existing_volume_id_is_treated_as_unset(
         )
 
     monkeypatch.setattr(resources_module, "Volume", fail_if_volume_created)
-    monkeypatch.setattr(resources_module, "VolumeAttach",
-                        fail_if_volume_attached)
+    monkeypatch.setattr(resources_module, "VolumeAttach", fail_if_volume_attached)
 
     volume, attachment = resources_module.create_or_attach_volume(
         _config(volumes={"existing_volume_id": "   "}),
@@ -621,8 +612,7 @@ def test_preserve_on_destroy_false_leaves_created_volume_managed_normally(
     monkeypatch.setattr(resources_module, "VolumeAttach", FakeVolumeAttach)
 
     volume, attachment = resources_module.create_or_attach_volume(
-        _config(volumes={"create": True, "size_gb": 500,
-                "preserve_on_destroy": False}),
+        _config(volumes={"create": True, "size_gb": 500, "preserve_on_destroy": False}),
         "test-cluster",
         "test-cluster-master-id",
         ["test-cluster"],
@@ -747,8 +737,7 @@ def test_empty_floating_ip_allocates_new_address(
 
     mocks, resolved_outputs, _ = _run_stack(config, monkeypatch)
 
-    floating_ips = _resource_inputs(
-        mocks, "openstack:networking/floatingIp:FloatingIp")
+    floating_ips = _resource_inputs(mocks, "openstack:networking/floatingIp:FloatingIp")
     associations = _resource_inputs(
         mocks, "openstack:networking/floatingIpAssociate:FloatingIpAssociate"
     )
@@ -773,8 +762,7 @@ def test_packer_floating_ip_pool_remains_backwards_compatible(
     )
 
     mocks, _, _ = _run_stack(config, monkeypatch)
-    floating_ips = _resource_inputs(
-        mocks, "openstack:networking/floatingIp:FloatingIp")
+    floating_ips = _resource_inputs(mocks, "openstack:networking/floatingIp:FloatingIp")
 
     assert len(floating_ips) == 1
     assert floating_ips[0]["pool"] == "public"
@@ -802,8 +790,7 @@ def test_existing_floating_ip_is_associated_to_master(
     )
 
     mocks, resolved_outputs, _ = _run_stack(config, monkeypatch)
-    floating_ips = _resource_inputs(
-        mocks, "openstack:networking/floatingIp:FloatingIp")
+    floating_ips = _resource_inputs(mocks, "openstack:networking/floatingIp:FloatingIp")
     associations = _resource_inputs(
         mocks, "openstack:networking/floatingIpAssociate:FloatingIpAssociate"
     )
@@ -925,8 +912,7 @@ def test_existing_floating_ip_is_retained_on_destroy(
         ),
         "test-cluster",
         ["test-cluster"],
-        cast(resources_module.Port, SimpleNamespace(
-            id="test-cluster-master-port-id")),
+        cast(resources_module.Port, SimpleNamespace(id="test-cluster-master-port-id")),
     )
 
     assert result == "1.2.3.4"
@@ -998,8 +984,7 @@ def test_monitoring_netdata_create_flow_shares_one_api_key_across_all_nodes(
     master_user_data = user_data_by_name["test-cluster-master"]
     worker_user_data = user_data_by_name["test-cluster-worker-01"]
     worker_api_keys = {
-        _extract_netdata_api_key(
-            user_data_by_name[f"test-cluster-worker-{index:02d}"])
+        _extract_netdata_api_key(user_data_by_name[f"test-cluster-worker-{index:02d}"])
         for index in range(1, 4)
     }
 
@@ -1057,8 +1042,7 @@ def test_missing_lustre_network_raises_pulumi_error(
             raise RuntimeError("not found")
         return FakeNetworkLookup(id=f"{name}-id", name=name)
 
-    monkeypatch.setattr(
-        "hailstack.pulumi.resources.get_network", fake_get_network)
+    monkeypatch.setattr("hailstack.pulumi.resources.get_network", fake_get_network)
 
     with pytest.raises(PulumiError, match="Network 'missing-lustre' not found"):
         _run_stack(config, monkeypatch)
@@ -1089,8 +1073,7 @@ def test_whitespace_lustre_network_is_treated_as_unset(
         }
     )
 
-    monkeypatch.setattr(
-        "hailstack.pulumi.resources.get_network", fake_get_network)
+    monkeypatch.setattr("hailstack.pulumi.resources.get_network", fake_get_network)
 
     _run_stack(config, monkeypatch)
 

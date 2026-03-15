@@ -14,6 +14,10 @@ From: python:3.14-slim
   apt-get update && apt-get install -y \
     curl unzip openssh-client uuid-runtime gnupg
   curl -fsSL https://get.pulumi.com | sh
+  install -d /usr/local/pulumi
+  cp -a /root/.pulumi/. /usr/local/pulumi/
+  ln -sf /usr/local/pulumi/bin/pulumi /usr/local/bin/pulumi
+  rm -rf /root/.pulumi
   curl -fsSL https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip \
     -o /tmp/packer.zip
   unzip -o /tmp/packer.zip -d /usr/local/bin
@@ -23,7 +27,7 @@ From: python:3.14-slim
   apt-get clean && rm -rf /var/lib/apt/lists/*
 
 %environment
-  export PATH="/root/.pulumi/bin:$PATH"
+  export PATH="/usr/local/pulumi/bin:$PATH"
 
 %runscript
   exec hailstack "$@"

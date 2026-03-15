@@ -125,8 +125,11 @@ def test_m1_acceptance_3_sif_contains_pulumi_packer_and_ansible_executables() ->
     environment_section = _section(definition, "environment")
     post_section = _section(definition, "post")
 
-    assert 'export PATH="/root/.pulumi/bin:$PATH"' in environment_section
+    assert 'export PATH="/usr/local/pulumi/bin:$PATH"' in environment_section
     assert "curl -fsSL https://get.pulumi.com | sh" in post_section
+    assert "cp -a /root/.pulumi/. /usr/local/pulumi/" in post_section
+    assert "ln -sf /usr/local/pulumi/bin/pulumi /usr/local/bin/pulumi" in post_section
+    assert "rm -rf /root/.pulumi" in post_section
     assert (
         "https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip"
         in post_section

@@ -30,6 +30,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from time import sleep
 from typing import Annotated, Protocol, cast
 
 import typer
@@ -48,12 +49,30 @@ from hailstack.errors import (
     PulumiError,
     QuotaExceededError,
     ResourceNotFoundError,
-    S3Error,
 )
 from hailstack.pulumi.stack import AutomationStackRunner
 from hailstack.runtime_paths import BUNDLES_TOML_PATH
 
 DEFAULT_COMPATIBILITY_MATRIX_PATH = BUNDLES_TOML_PATH
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_TRANSIENT_OPENSTACK_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "temporary failure",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "connection closed",
+    "no route to host",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "endpoint not found",
+    "endpoint for",
+    "unable to establish connection",
+)
 
 
 @dataclass(frozen=True)
@@ -313,41 +332,47 @@ class OpenStackCLIClient:
 
     def _run_optional_show(self, command: list[str]) -> dict[str, object] | None:
         """Run an OpenStack show command and return JSON on success only."""
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise NetworkError("OpenStack CLI not found") from error
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            if _openstack_show_failed_not_found(detail):
-                return None
-            raise NetworkError(f"OpenStack command failed: {detail}")
-
-        return _parse_json_mapping(result.stdout, "OpenStack CLI")
+        return self._run_show(command, allow_not_found=True)
 
     def _run_required_show(self, command: list[str]) -> dict[str, object]:
         """Run an OpenStack command and require a successful JSON response."""
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise NetworkError("OpenStack CLI not found") from error
+        payload = self._run_show(command, allow_not_found=False)
+        assert payload is not None
+        return payload
 
-        if result.returncode != 0:
+    def _run_show(
+        self,
+        command: list[str],
+        *,
+        allow_not_found: bool,
+    ) -> dict[str, object] | None:
+        """Run an OpenStack command with retries for transient control-plane errors."""
+        for attempt, backoff_seconds in enumerate((0.0, *_RETRY_BACKOFF_SECONDS)):
+            if attempt > 0:
+                sleep(backoff_seconds)
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+            except FileNotFoundError as error:
+                raise NetworkError("OpenStack CLI not found") from error
+
+            if result.returncode == 0:
+                return _parse_json_mapping(result.stdout, "OpenStack CLI")
+
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            if _looks_like_transient_openstack_error(detail) and attempt < len(
+                _RETRY_BACKOFF_SECONDS
+            ):
+                continue
+            if allow_not_found and _openstack_show_failed_not_found(detail):
+                return None
             raise NetworkError(f"OpenStack command failed: {detail}")
 
-        return _parse_json_mapping(result.stdout, "OpenStack CLI")
+        raise AssertionError("OpenStack retry loop exhausted unexpectedly")
 
     def _server_id(self, server_name: str) -> str | None:
         """Return the UUID for a server name when it exists."""
@@ -376,6 +401,12 @@ def _openstack_show_failed_not_found(detail: str) -> bool:
         "not found",
     )
     return any(marker in lowered for marker in not_found_markers)
+
+
+def _looks_like_transient_openstack_error(detail: str) -> bool:
+    """Return whether an OpenStack CLI failure is worth retrying."""
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _TRANSIENT_OPENSTACK_ERROR_MARKERS)
 
 
 def get_create_logger() -> logging.Logger:
@@ -630,7 +661,12 @@ def _require_int(payload: Mapping[str, object], key: str) -> int:
     if isinstance(value, int):
         return value
     if isinstance(value, str):
-        return int(value)
+        try:
+            return int(value)
+        except ValueError as error:
+            raise NetworkError(
+                f"OpenStack CLI response had invalid integer field '{key}'"
+            ) from error
     raise NetworkError(f"OpenStack CLI response missing integer field '{key}'")
 
 
@@ -722,49 +758,19 @@ def create_command(
 
     matrix = CompatibilityMatrix(DEFAULT_COMPATIBILITY_MATRIX_PATH)
     resolved_bundle = _resolve_bundle(matrix, loaded_config)
-    loaded_config = loaded_config.validate_for_command(
-        "create",
-        require_backend=not dry_run,
-    )
+    loaded_config = loaded_config.validate_for_command("create")
     logger.info("bundle resolved")
 
     pulumi_runner = create_pulumi_stack_runner(logger)
-    stack_already_exists = False
-    current_outputs = None
-    backend_available = False
-    degraded_dry_run = False
-    if dry_run:
-        if loaded_config.ceph_s3.has_required_credentials():
-            try:
-                pulumi_runner.check_backend_access(loaded_config)
-            except (PulumiError, S3Error) as error:
-                degraded_dry_run = True
-                logger.warning(
-                    "backend unavailable for dry-run preview; "
-                    "falling back to local preview: %s",
-                    error,
-                )
-            else:
-                backend_available = True
-        else:
-            degraded_dry_run = True
-            logger.warning(
-                "backend credentials missing for dry-run preview; "
-                "falling back to local preview without update-aware checks"
-            )
-    else:
-        pulumi_runner.check_backend_access(loaded_config)
-        backend_available = True
+    pulumi_runner.check_backend_access(loaded_config)
+    stack_already_exists = pulumi_runner.stack_exists(loaded_config)
+    current_outputs = (
+        pulumi_runner.current_stack_outputs(loaded_config)
+        if stack_already_exists
+        else None
+    )
 
-    if backend_available:
-        stack_already_exists = pulumi_runner.stack_exists(loaded_config)
-        current_outputs = (
-            pulumi_runner.current_stack_outputs(loaded_config)
-            if stack_already_exists
-            else None
-        )
-
-    preflight_warnings = _run_preflight_validation(
+    _run_preflight_validation(
         loaded_config,
         resolved_bundle,
         create_openstack_preflight_client(),
@@ -774,26 +780,14 @@ def create_command(
             else None
         ),
         current_stack_outputs=current_outputs,
-        skip_backend_dependent_checks=degraded_dry_run,
     )
     logger.info("pre-flight passed")
 
     if dry_run:
-        if degraded_dry_run:
-            typer.echo(
-                "Warning: backend unavailable; preview assumes a first create "
-                "and skips update-aware checks.",
-                err=True,
-            )
-            for warning in preflight_warnings:
-                typer.echo(
-                    f"Warning: possible backend-independent blocker: {warning}",
-                    err=True,
-                )
         preview_output = pulumi_runner.preview(
             loaded_config,
             resolved_bundle,
-            stack_exists=stack_already_exists if backend_available else False,
+            stack_exists=stack_already_exists,
         )
         typer.echo(preview_output, nl=not preview_output.endswith("\n"))
         return
