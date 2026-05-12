@@ -16,12 +16,19 @@ You need the following before you start:
 
 You will also need values for these secrets, which the example config reads from the environment:
 
-| Variable                                    | Required when                                                  | Purpose                                                       |
-| ------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------- |
-| `HAILSTACK_WEB_PASSWORD`                    | always (for `create`)                                          | Jupyter password and nginx basic-auth password on the master. |
-| `HAILSTACK_VOLUME_PASSWORD`                 | `volumes.create = true` or `volumes.existing_volume_id` is set | LUKS passphrase for the data volume.                          |
-| `CEPH_S3_ACCESS_KEY` / `CEPH_S3_SECRET_KEY` | always                                                         | Credentials for the Pulumi-state bucket.                      |
-| `S3A_ACCESS_KEY` / `S3A_SECRET_KEY`         | when Spark/Hadoop need S3A                                     | Credentials baked into Hadoop config on cluster nodes.        |
+| Variable                                    | Required when                                                                                        | Purpose                                                                                                                                     |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HAILSTACK_WEB_PASSWORD`                    | always (for `create`)                                                                                | Jupyter password and nginx basic-auth password on the master.                                                                               |
+| `HAILSTACK_VOLUME_PASSWORD`                 | only when `volumes.create = true` or `volumes.existing_volume_id` is set; omit if you have no volume | LUKS passphrase for the data volume.                                                                                                        |
+| `CEPH_S3_ACCESS_KEY` / `CEPH_S3_SECRET_KEY` | always                                                                                               | Credentials used **by the CLI on your workstation** to read/write the Pulumi state bucket (`ceph_s3.bucket`) and install rollout manifests. |
+| `S3A_ACCESS_KEY` / `S3A_SECRET_KEY`         | optional; only when Spark/Hadoop jobs need to read or write `s3a://...` data                         | Credentials baked into Hadoop's `core-site.xml` **on the cluster nodes** so jobs can access your data buckets.                              |
+
+The two S3 credential pairs serve different purposes and usually point at different buckets:
+
+- `CEPH_S3_*` is for the **state bucket** used by Hailstack itself (Pulumi backend + install rollout manifests). Give it a key scoped to that one bucket.
+- `S3A_*` is for the **data buckets** your analyses read and write from inside Spark/Hadoop. Omit it if your workloads never touch S3.
+
+They can be the same key if you want, but keeping them separate lets you rotate them independently and grant the cluster's data access more broadly than the CLI's state access.
 
 ## Installation
 
@@ -120,16 +127,18 @@ The steps below assume you have completed Installation and the `hailstack` comma
    apptainer exec dist/hailstack.sif cat /opt/hailstack/example-config.toml > my-cluster.toml
    ```
 
-3. Create a `.env` file next to `my-cluster.toml` to hold the secrets your TOML references with `$VAR`. Keep this file out of version control. The example config refers to all of the variables below; drop any you do not use.
+3. Create a `.env` file next to `my-cluster.toml` to hold the secrets your TOML references with `$VAR`. Keep this file out of version control. Only `HAILSTACK_WEB_PASSWORD` and the `CEPH_S3_*` pair are always required; omit `HAILSTACK_VOLUME_PASSWORD` if you are not using a data volume, and omit the `S3A_*` pair if your workloads do not need S3A access. Remove the matching `$VAR` references from `my-cluster.toml` as well when you drop a variable.
 
    ```bash
    cat > .env <<'EOF'
    HAILSTACK_WEB_PASSWORD=choose-a-strong-password
-   HAILSTACK_VOLUME_PASSWORD=choose-a-volume-passphrase
    CEPH_S3_ACCESS_KEY=your-ceph-state-access-key
    CEPH_S3_SECRET_KEY=your-ceph-state-secret-key
-   S3A_ACCESS_KEY=your-s3a-access-key
-   S3A_SECRET_KEY=your-s3a-secret-key
+   # Optional: only needed if volumes.create=true or volumes.existing_volume_id is set
+   HAILSTACK_VOLUME_PASSWORD=choose-a-volume-passphrase
+   # Optional: only needed if Spark/Hadoop jobs access s3a:// data
+   S3A_ACCESS_KEY=your-s3a-data-access-key
+   S3A_SECRET_KEY=your-s3a-data-secret-key
    EOF
    chmod 600 .env
    ```
