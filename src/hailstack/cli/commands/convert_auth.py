@@ -139,8 +139,9 @@ def convert_auth_command(
     yaml_output = _render_clouds_yaml()
     logger.info("clouds.yaml generated")
     if write:
+        clouds_yaml_path = _clouds_yaml_path()
         _write_clouds_yaml(yaml_output)
-        logger.info("clouds.yaml written")
+        logger.info("clouds.yaml written to %s", clouds_yaml_path)
         return
     typer.echo(yaml_output, nl=False)
 
