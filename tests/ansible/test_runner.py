@@ -44,6 +44,8 @@ class HostVarsPayload:
 
     ansible_host: str
     ansible_user: str
+    ansible_ssh_common_args: str
+    ansible_ssh_retries: int
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,11 @@ def _require_str(value: object, *, context: str) -> str:
 
 def _require_bool(value: object, *, context: str) -> bool:
     assert isinstance(value, bool), f"{context} must be a bool"
+    return value
+
+
+def _require_int(value: object, *, context: str) -> int:
+    assert isinstance(value, int), f"{context} must be an int"
     return value
 
 
@@ -197,6 +204,14 @@ def _load_host_mapping(value: object, *, context: str) -> dict[str, HostVarsPayl
             ),
             ansible_user=_require_str(
                 host_vars["ansible_user"], context="ansible_user"
+            ),
+            ansible_ssh_common_args=_require_str(
+                host_vars["ansible_ssh_common_args"],
+                context="ansible_ssh_common_args",
+            ),
+            ansible_ssh_retries=_require_int(
+                host_vars["ansible_ssh_retries"],
+                context="ansible_ssh_retries",
             ),
         )
     return hosts
@@ -361,6 +376,8 @@ def test_run_install_playbook_installs_system_packages_on_all_inventory_hosts(
             "198.51.100.10": HostVarsPayload(
                 ansible_host="198.51.100.10",
                 ansible_user="ubuntu",
+                ansible_ssh_common_args=runner_module.SSH_COMMON_ARGS,
+                ansible_ssh_retries=runner_module.SSH_CONNECT_RETRIES,
             )
         }
     )
@@ -369,17 +386,25 @@ def test_run_install_playbook_installs_system_packages_on_all_inventory_hosts(
             "10.0.0.21": HostVarsPayload(
                 ansible_host="10.0.0.21",
                 ansible_user="ubuntu",
+                ansible_ssh_common_args=runner_module.SSH_COMMON_ARGS,
+                ansible_ssh_retries=runner_module.SSH_CONNECT_RETRIES,
             ),
             "10.0.0.22": HostVarsPayload(
                 ansible_host="10.0.0.22",
                 ansible_user="ubuntu",
+                ansible_ssh_common_args=runner_module.SSH_COMMON_ARGS,
+                ansible_ssh_retries=runner_module.SSH_CONNECT_RETRIES,
             ),
             "10.0.0.23": HostVarsPayload(
                 ansible_host="10.0.0.23",
                 ansible_user="ubuntu",
+                ansible_ssh_common_args=runner_module.SSH_COMMON_ARGS,
+                ansible_ssh_retries=runner_module.SSH_CONNECT_RETRIES,
             ),
         }
     )
+    assert "-o ConnectTimeout=30" in runner_module.SSH_COMMON_ARGS
+    assert runner_module.SSH_CONNECT_RETRIES == 60
     assert (
         _require_str(system_install_body["name"], context="apt name")
         == "{{ system_packages }}"

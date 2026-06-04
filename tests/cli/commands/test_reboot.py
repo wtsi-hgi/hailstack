@@ -192,7 +192,7 @@ def test_reboot_without_node_targets_all_workers(
     ]
     assert fake_executor.calls[0]["ssh_username"] == "ubuntu"
     assert fake_executor.calls[0]["ssh_key_path"] is None
-    assert fake_executor.calls[0]["timeout_seconds"] == 300.0
+    assert fake_executor.calls[0]["timeout_seconds"] == 1800.0
     assert fake_executor.calls[0]["backoff_seconds"] == (1.0, 2.0, 4.0)
 
 

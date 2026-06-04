@@ -66,6 +66,7 @@ source "openstack" "hailstack" {
   source_image     = var.base_image
   flavor           = var.flavor
   ssh_username     = var.ssh_username
+  ssh_timeout      = "30m"
   networks         = [var.network]
   floating_ip_pool = var.floating_ip_pool
 }

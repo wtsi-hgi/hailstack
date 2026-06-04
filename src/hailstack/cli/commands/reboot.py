@@ -45,7 +45,7 @@ type BootMarkerReader = Callable[["RebootTarget", str, Path | None], str]
 type Sleeper = Callable[[float], None]
 type Clock = Callable[[], float]
 
-_REBOOT_TIMEOUT_SECONDS = 300.0
+_REBOOT_TIMEOUT_SECONDS = 1800.0
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 _SSH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 _SSH_HOST_KEY_OPTIONS = (

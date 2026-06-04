@@ -171,6 +171,42 @@ def test_build_image_raises_packer_error_with_stderr_output_on_failure(
         )
 
 
+def test_build_image_failure_summarizes_machine_readable_packer_output(
+    tmp_path: Path,
+) -> None:
+    """Translate Packer machine-readable failures into user-facing diagnostics."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_path = _write_template_assets(tmp_path)
+    packer_output = "\n".join(
+        (
+            "1780585788,,ui,say,==> openstack.hailstack: Waiting for SSH to "
+            "become available...",
+            "1780586088,,ui,error,==> openstack.hailstack: Timeout waiting for SSH.",
+            "1780586093,openstack.hailstack,error,Timeout waiting for SSH.",
+            "1780586093,,ui,say,\\n==> Builds finished but no artifacts were created.",
+        )
+    )
+
+    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+        del command
+        return _result(packer_output, returncode=1)
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fake_runner,
+            template_path=template_path,
+        )
+
+    message = str(raised.value)
+    assert "Packer build failed." in message
+    assert "Packer diagnostics:" in message
+    assert "openstack.hailstack: Timeout waiting for SSH." in message
+    assert "Raw Packer output:" in message
+    assert "1780586088,,ui,error" in message
+
+
 def test_build_image_maps_hadoop_version_to_packer_vars(tmp_path: Path) -> None:
     """Provide the bundle Hadoop version to the packer template."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -382,6 +418,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     assert 'image_name       = "hailstack-${var.bundle_id}"' in template
+    assert 'ssh_timeout      = "30m"' in template
     for variable_name in (
         "bundle_id",
         "hail_version",

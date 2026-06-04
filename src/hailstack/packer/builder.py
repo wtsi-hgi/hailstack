@@ -61,6 +61,7 @@ REQUIRED_PACKER_SCRIPT_PATHS = tuple(
     PACKER_ROOT_PATH / relative_path
     for relative_path in REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS
 )
+_MAX_PACKER_DIAGNOSTIC_LINES = 8
 
 
 class PackerRunner(Protocol):
@@ -121,6 +122,91 @@ def _extract_image_id(stdout: str) -> str:
     raise PackerError("Packer build completed without reporting an image ID")
 
 
+def _packer_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """Render readable Packer diagnostics while preserving raw command output."""
+    raw_output = _raw_packer_output(result)
+    if not raw_output:
+        return "Packer build failed: unknown error"
+
+    diagnostics = _extract_packer_diagnostics(raw_output)
+    if not diagnostics:
+        return f"Packer build failed: {raw_output}"
+
+    diagnostic_lines = "\n".join(f"- {line}" for line in diagnostics)
+    return (
+        "Packer build failed.\n"
+        f"Packer diagnostics:\n{diagnostic_lines}\n"
+        f"Raw Packer output:\n{raw_output}"
+    )
+
+
+def _raw_packer_output(result: subprocess.CompletedProcess[str]) -> str:
+    """Return all captured Packer output in the order users expect to inspect."""
+    outputs = [
+        output.strip()
+        for output in (result.stderr, result.stdout)
+        if output.strip()
+    ]
+    return "\n".join(outputs)
+
+
+def _extract_packer_diagnostics(raw_output: str) -> list[str]:
+    """Extract the most useful human-readable messages from Packer output."""
+    diagnostics: list[str] = []
+    for line in raw_output.splitlines():
+        message = _parse_packer_machine_readable_message(line)
+        if message is None:
+            continue
+        if not _is_packer_diagnostic_message(message):
+            continue
+        if message not in diagnostics:
+            diagnostics.append(message)
+        if len(diagnostics) == _MAX_PACKER_DIAGNOSTIC_LINES:
+            break
+
+    return diagnostics
+
+
+def _parse_packer_machine_readable_message(line: str) -> str | None:
+    """Parse one machine-readable Packer line into display text when possible."""
+    parts = line.split(",", maxsplit=4)
+    if len(parts) < 4:
+        return None
+
+    target = parts[1].strip()
+    record_type = parts[2].strip()
+    if record_type == "ui" and len(parts) == 5:
+        return _clean_packer_message(parts[4])
+    if record_type == "error":
+        message = _clean_packer_message(parts[3])
+        if target and not message.startswith(f"{target}:"):
+            return f"{target}: {message}"
+        return message
+
+    return None
+
+
+def _clean_packer_message(message: str) -> str:
+    """Normalize Packer message text without hiding its original meaning."""
+    return message.replace("\\n", "\n").strip()
+
+
+def _is_packer_diagnostic_message(message: str) -> bool:
+    """Return whether a Packer message belongs in the failure summary."""
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "error",
+            "errored",
+            "failed",
+            "timeout",
+            "timed out",
+            "no artifacts were created",
+        )
+    )
+
+
 def _required_packer_script_paths(template_path: Path) -> tuple[Path, ...]:
     """Return the script paths required by the checked-in packer template."""
     return tuple(
@@ -168,8 +254,7 @@ def build_image(
 
     result = runner(_packer_command(template_path, _packer_vars(config, bundle)))
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-        raise PackerError(f"Packer build failed: {detail}")
+        raise PackerError(_packer_failure_detail(result))
 
     image_id = _extract_image_id(result.stdout)
     active_logger.info("image uploaded")

@@ -35,7 +35,9 @@ from hailstack.errors import AnsibleError
 from hailstack.runtime_paths import INSTALL_PLAYBOOK_PATH, runtime_work_dir
 
 PLAYBOOK_PATH = INSTALL_PLAYBOOK_PATH
-_SSH_COMMON_ARGS = (
+SSH_CONNECT_RETRIES = 60
+SSH_COMMON_ARGS = (
+    "-o ConnectTimeout=30 "
     "-o StrictHostKeyChecking=no "
     "-o UserKnownHostsFile=/dev/null "
     "-o GlobalKnownHostsFile=/dev/null"
@@ -147,20 +149,22 @@ def _write_inventory_file(
     worker_jump_host: str | None,
 ) -> None:
     """Write a JSON inventory for the install playbook."""
-    hosts: dict[str, dict[str, str]] = {}
-    children: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    hosts: dict[str, dict[str, str | int]] = {}
+    children: dict[str, dict[str, dict[str, dict[str, str | int]]]] = {}
 
     for group_name, group_hosts in inventory.items():
-        group_entries: dict[str, dict[str, str]] = {}
+        group_entries: dict[str, dict[str, str | int]] = {}
         for hostname in group_hosts:
-            host_vars = {
+            host_vars: dict[str, str | int] = {
                 "ansible_host": hostname,
                 "ansible_user": ssh_username,
-                "ansible_ssh_common_args": _SSH_COMMON_ARGS,
+                "ansible_ssh_common_args": SSH_COMMON_ARGS,
+                "ansible_ssh_retries": SSH_CONNECT_RETRIES,
             }
             if group_name == "worker" and worker_jump_host is not None:
                 host_vars["ansible_ssh_common_args"] = (
-                    f"-o ProxyJump={ssh_username}@{worker_jump_host} {_SSH_COMMON_ARGS}"
+                    f"-o ProxyJump={ssh_username}@{worker_jump_host} "
+                    f"{SSH_COMMON_ARGS}"
                 )
             hosts[hostname] = host_vars
             group_entries[hostname] = host_vars
@@ -277,4 +281,9 @@ def _coerce_string_list(value: object) -> list[str]:
     return strings
 
 
-__all__ = ["NodeResult", "run_install_playbook"]
+__all__ = [
+    "NodeResult",
+    "SSH_COMMON_ARGS",
+    "SSH_CONNECT_RETRIES",
+    "run_install_playbook",
+]
