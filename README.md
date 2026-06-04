@@ -198,6 +198,36 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | `cluster.floating_ip`         | Existing unassociated IPv4 address to attach to the master. Leave empty to allocate one.                            | `string`  | `""`                                           | `1.2.3.4`                      |
 | `cluster.floating_ip_pool`    | Floating IP pool name used when `create` needs to allocate a master IP instead of reusing `cluster.floating_ip`.    | `string`  | `""`                                           | `public`                       |
 
+#### Finding Lustre Values
+
+For secure Lustre, both values are site-specific. `cluster.lustre_network`
+must be the OpenStack network that can reach Lustre; Hailstack adds a second
+Neutron port on that network to every node. With OpenStack credentials loaded,
+list the networks your project can see:
+
+```bash
+openstack network list
+openstack network show <network-name>
+```
+
+Choose the Lustre access network, often named with `lustre` or
+`secure-lustre`. If no such network is visible, ask your OpenStack administrator
+to grant the project access.
+
+`cluster.lustre_mount_target` is the Lustre mount source, not a value Hailstack
+discovers. On an existing client for the same filesystem, use one of:
+
+```bash
+findmnt -t lustre -o SOURCE,TARGET
+grep -w lustre /etc/fstab
+mount -t lustre
+```
+
+Copy the source value, for example `192.0.2.10@tcp:/fsx`. If there is no
+existing client, ask the storage team for the client mount command or the
+MGS/NID plus filesystem name. In `mount -t lustre <source> /lustre`, `<source>`
+is the `cluster.lustre_mount_target` value.
+
 ### `[packer]`
 
 `[packer]` is optional overall, but `build-image` requires it.
