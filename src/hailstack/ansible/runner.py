@@ -163,8 +163,7 @@ def _write_inventory_file(
             }
             if group_name == "worker" and worker_jump_host is not None:
                 host_vars["ansible_ssh_common_args"] = (
-                    f"-o ProxyJump={ssh_username}@{worker_jump_host} "
-                    f"{SSH_COMMON_ARGS}"
+                    f"-o ProxyJump={ssh_username}@{worker_jump_host} {SSH_COMMON_ARGS}"
                 )
             hosts[hostname] = host_vars
             group_entries[hostname] = host_vars

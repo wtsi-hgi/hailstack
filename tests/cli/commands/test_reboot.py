@@ -390,8 +390,7 @@ def test_ssh_reboot_executor_times_out_when_connectivity_never_returns() -> None
         reboot_requester=lambda target, ssh_username, ssh_key_path: None,
         connectivity_checker=lambda target, ssh_username, ssh_key_path: False,
         boot_marker_reader=lambda target, ssh_username, ssh_key_path: "boot-1",
-        sleeper=lambda seconds: elapsed.__setitem__(
-            "now", elapsed["now"] + seconds),
+        sleeper=lambda seconds: elapsed.__setitem__("now", elapsed["now"] + seconds),
         clock=lambda: elapsed["now"],
     )
 
@@ -419,8 +418,7 @@ def test_ssh_reboot_executor_times_out_when_boot_id_never_changes() -> None:
         reboot_requester=lambda target, ssh_username, ssh_key_path: None,
         connectivity_checker=lambda target, ssh_username, ssh_key_path: True,
         boot_marker_reader=lambda target, ssh_username, ssh_key_path: "boot-1",
-        sleeper=lambda seconds: elapsed.__setitem__(
-            "now", elapsed["now"] + seconds),
+        sleeper=lambda seconds: elapsed.__setitem__("now", elapsed["now"] + seconds),
         clock=lambda: elapsed["now"],
     )
 
@@ -492,10 +490,8 @@ def test_ssh_reboot_executor_retries_transport_failures_before_dispatch() -> Non
     """Retry transient SSH transport failures while dispatching reboot."""
     sleep_calls: list[float] = []
     results = [
-        subprocess.CompletedProcess(
-            [], 255, stdout="", stderr="Connection timed out"),
-        subprocess.CompletedProcess(
-            [], 255, stdout="", stderr="Connection timed out"),
+        subprocess.CompletedProcess([], 255, stdout="", stderr="Connection timed out"),
+        subprocess.CompletedProcess([], 255, stdout="", stderr="Connection timed out"),
         subprocess.CompletedProcess([], 0, stdout="", stderr=""),
     ]
     executor = _SSHRebootExecutorHarness(
@@ -551,8 +547,7 @@ def test_ssh_reboot_executor_surfaces_non_transport_boot_marker_failures() -> No
             connectivity
         ),
         boot_marker_reader=boot_marker_reader,
-        sleeper=lambda seconds: elapsed.__setitem__(
-            "now", elapsed["now"] + seconds),
+        sleeper=lambda seconds: elapsed.__setitem__("now", elapsed["now"] + seconds),
         clock=lambda: elapsed["now"],
     )
 
@@ -586,8 +581,7 @@ def test_ssh_reboot_executor_tolerates_transport_drop_when_reboot_starts(
 
     monkeypatch.setattr(reboot_module.subprocess, "run", fake_run)
 
-    executor = _SSHRebootExecutorHarness(
-        logger=reboot_module.get_reboot_logger())
+    executor = _SSHRebootExecutorHarness(logger=reboot_module.get_reboot_logger())
 
     executor.request_reboot(
         reboot_module.RebootTarget(
@@ -636,8 +630,7 @@ def test_ssh_reboot_executor_raises_when_reboot_cannot_be_dispatched(
 
     monkeypatch.setattr(reboot_module.subprocess, "run", fake_run)
 
-    executor = _SSHRebootExecutorHarness(
-        logger=reboot_module.get_reboot_logger())
+    executor = _SSHRebootExecutorHarness(logger=reboot_module.get_reboot_logger())
 
     with pytest.raises(SSHError, match="Failed to dispatch reboot to worker-01"):
         executor.request_reboot(

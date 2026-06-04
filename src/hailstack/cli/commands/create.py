@@ -286,8 +286,7 @@ class OpenStackCLIClient:
             )
             if volume_payload is None:
                 continue
-            current_name = volume_payload.get(
-                "name") or volume_payload.get("Name")
+            current_name = volume_payload.get("name") or volume_payload.get("Name")
             if not isinstance(current_name, str) or current_name.strip() != volume_name:
                 continue
             return _require_int(volume_payload, "size")
@@ -599,8 +598,7 @@ def _run_preflight_validation(
 
     details: list[str] = []
     if missing_resources:
-        details.append(
-            f"Unavailable resources: {', '.join(missing_resources)}")
+        details.append(f"Unavailable resources: {', '.join(missing_resources)}")
     if quota_breaches:
         details.append(f"Quota exceeded: {', '.join(quota_breaches)}")
     message = "; ".join(details)
@@ -690,8 +688,7 @@ def _attachments_include_server_id(value: object, server_id: str) -> bool:
         if not isinstance(item, dict):
             continue
         attachment = cast(dict[object, object], item)
-        attachment_server_id = attachment.get(
-            "server_id") or attachment.get("serverId")
+        attachment_server_id = attachment.get("server_id") or attachment.get("serverId")
         if (
             isinstance(attachment_server_id, str)
             and attachment_server_id.strip() == server_id
@@ -733,8 +730,7 @@ def _available_limit(
 def create_command(
     config: Annotated[
         Path,
-        typer.Option(
-            "--config", help="Path to cluster configuration TOML file."),
+        typer.Option("--config", help="Path to cluster configuration TOML file."),
     ],
     dry_run: Annotated[
         bool,
@@ -798,8 +794,7 @@ def create_command(
     except PulumiError as error:
         if not stack_already_exists:
             try:
-                pulumi_runner.cleanup_failed_create(
-                    loaded_config, resolved_bundle)
+                pulumi_runner.cleanup_failed_create(loaded_config, resolved_bundle)
             except PulumiError as cleanup_error:
                 raise PulumiError(
                     f"{error}; cleanup after failed create also failed: {cleanup_error}"
@@ -808,8 +803,7 @@ def create_command(
 
     master_public_ip = getattr(result, "master_public_ip", None)
     if not isinstance(master_public_ip, str) or not master_public_ip:
-        raise PulumiError(
-            "Create result did not contain a master_public_ip value")
+        raise PulumiError("Create result did not contain a master_public_ip value")
 
     logger.info("cluster ready")
     typer.echo(

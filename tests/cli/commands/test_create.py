@@ -100,8 +100,7 @@ class FakeOpenStackClient:
     ) -> None:
         """Initialise fake resource lookup state."""
         self.images = (
-            images if images is not None else {
-                "hailstack-hail-0.2.137-gnomad-3.0.4-r2"}
+            images if images is not None else {"hailstack-hail-0.2.137-gnomad-3.0.4-r2"}
         )
         self.flavours = (
             flavours
@@ -113,15 +112,13 @@ class FakeOpenStackClient:
         )
         self.networks = networks if networks is not None else {"private-net"}
         self.available_floating_ips = (
-            available_floating_ips if available_floating_ips is not None else set[str](
-            )
+            available_floating_ips if available_floating_ips is not None else set[str]()
         )
         self.existing_volumes = (
             existing_volumes if existing_volumes is not None else set[str]()
         )
         self.unavailable_volumes = (
-            unavailable_volumes if unavailable_volumes is not None else set[str](
-            )
+            unavailable_volumes if unavailable_volumes is not None else set[str]()
         )
         self.attached_volumes_by_server = (
             attached_volumes_by_server if attached_volumes_by_server is not None else {}
@@ -464,8 +461,7 @@ def _write_config(
 def command_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point create bundle resolution at a temporary matrix file."""
     matrix_path = _write_bundles(tmp_path / "bundles.toml")
-    monkeypatch.setattr(
-        create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
+    monkeypatch.setattr(create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
     return matrix_path
 
 
@@ -506,8 +502,7 @@ def test_create_dry_run_shows_preview_output(
     fake_runner = FakePulumiRunner(preview_output="Plan: create 4 resources\n")
     _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 0
     assert result.stdout == "Plan: create 4 resources\n"
@@ -609,8 +604,7 @@ def test_create_dry_run_does_not_write_pulumi_state(
     fake_runner = FakePulumiRunner()
     _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 0
     assert fake_runner.checked_backend == 1
@@ -635,8 +629,7 @@ def test_create_dry_run_invalid_ceph_s3_credentials_raise_s3_error(
     )
     _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 1
     assert isinstance(result.exception, S3Error)
@@ -697,8 +690,7 @@ def test_create_dry_run_requires_ceph_s3_credentials_before_pulumi(
     fake_runner = FakePulumiRunner()
     _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 1
     assert isinstance(result.exception, ConfigError)
@@ -731,8 +723,7 @@ def test_create_dry_run_missing_ceph_credentials_fail_before_preflight(
     fake_runner = FakePulumiRunner()
     _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
 
-    result = runner.invoke(
-        app, ["create", "--config", str(config_path), "--dry-run"])
+    result = runner.invoke(app, ["create", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 1
     assert isinstance(result.exception, ConfigError)
@@ -822,8 +813,7 @@ def test_create_missing_network_raises_resource_error(
     del command_matrix
     config_path = _write_config(tmp_path / "create.toml")
     fake_runner = FakePulumiRunner()
-    _install_fakes(monkeypatch, FakeOpenStackClient(
-        networks=set()), fake_runner)
+    _install_fakes(monkeypatch, FakeOpenStackClient(networks=set()), fake_runner)
 
     result = runner.invoke(app, ["create", "--config", str(config_path)])
 
@@ -1289,8 +1279,7 @@ def test_create_existing_stack_skips_legacy_managed_volume_quota_recheck(
     _install_fakes(
         monkeypatch,
         FakeOpenStackClient(
-            attached_volumes_by_server={
-                "test-cluster-master": {"vol-managed"}},
+            attached_volumes_by_server={"test-cluster-master": {"vol-managed"}},
             volume_names={"vol-managed": "legacy-data"},
             volume_sizes_gb={"vol-managed": 100},
             volume_quota=VolumeQuota(gigabytes_available=0),
@@ -1352,8 +1341,7 @@ def test_create_existing_stack_checks_incremental_legacy_managed_volume_quota(
     _install_fakes(
         monkeypatch,
         FakeOpenStackClient(
-            attached_volumes_by_server={
-                "test-cluster-master": {"vol-managed"}},
+            attached_volumes_by_server={"test-cluster-master": {"vol-managed"}},
             volume_names={"vol-managed": "legacy-data"},
             volume_sizes_gb={"vol-managed": 40},
             volume_quota=VolumeQuota(gigabytes_available=50),

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from pip._vendor.packaging.requirements import Requirement
+from packaging.requirements import Requirement
 from typer.testing import CliRunner
 
 from hailstack.ansible import runner as ansible_runner_module
@@ -97,12 +97,10 @@ class FakePlaybookRunner:
     def __call__(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         """Record each install attempt and write one fake results file."""
         command_list = list(command)
-        vars_path = Path(
-            command_list[command_list.index("-e") + 1].removeprefix("@"))
+        vars_path = Path(command_list[command_list.index("-e") + 1].removeprefix("@"))
         payload = json.loads(vars_path.read_text(encoding="utf-8"))
         inventory_path = Path(command_list[command_list.index("-i") + 1])
-        inventory_payload = json.loads(
-            inventory_path.read_text(encoding="utf-8"))
+        inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
         self.calls.append(
             {
                 "inventory": inventory_payload,
@@ -224,8 +222,7 @@ def _distribution_name(requirement: str) -> str:
 def _distribution_version(requirement: str) -> str:
     """Choose an installed version that satisfies the requested requirement."""
     parsed_requirement = Requirement(requirement)
-    candidates = [
-        specifier.version for specifier in parsed_requirement.specifier]
+    candidates = [specifier.version for specifier in parsed_requirement.specifier]
     candidates.extend(["9999", "1.0", "0"])
     for candidate in candidates:
         if not parsed_requirement.specifier or parsed_requirement.specifier.contains(
@@ -256,8 +253,7 @@ def _verification_payload(
         return result.verification
 
     installed_system_packages = set(result.system_packages)
-    installed_python_versions = _installed_python_versions(
-        result.python_packages)
+    installed_python_versions = _installed_python_versions(result.python_packages)
     system_status = {
         package: package in installed_system_packages
         for package in requested_system_packages
@@ -382,8 +378,7 @@ def _install_fakes(
 
 def _uploaded_manifest(uploader: RecordingUploader) -> dict[str, object]:
     """Return the uploaded manifest JSON payload."""
-    manifest_keys = [
-        key for key in uploader.objects if key.endswith("/manifest.json")]
+    manifest_keys = [key for key in uploader.objects if key.endswith("/manifest.json")]
     assert len(manifest_keys) == 1
     return json.loads(uploader.objects[manifest_keys[0]].decode("utf-8"))
 
@@ -401,8 +396,7 @@ def test_install_system_package_verification_is_recorded(
     """Persist requested system packages in each uploaded per-node result."""
     config_path = _write_config(tmp_path / "install.toml")
     playbook_runner = FakePlaybookRunner(
-        responses=[_result_for_all_nodes(
-            success=True, system_packages=["libpq-dev"])]
+        responses=[_result_for_all_nodes(success=True, system_packages=["libpq-dev"])]
     )
     _, fake_playbook_runner, fake_uploader = _install_fakes(
         monkeypatch,
@@ -429,8 +423,7 @@ def test_install_python_package_verification_is_recorded(
     """Persist requested Python packages in each uploaded per-node result."""
     config_path = _write_config(tmp_path / "install.toml")
     playbook_runner = FakePlaybookRunner(
-        responses=[_result_for_all_nodes(
-            success=True, python_packages=["pandas"])]
+        responses=[_result_for_all_nodes(success=True, python_packages=["pandas"])]
     )
     _, fake_playbook_runner, fake_uploader = _install_fakes(
         monkeypatch,
@@ -477,8 +470,7 @@ def test_install_loads_system_and_python_packages_from_file(
 
     result = runner.invoke(
         app,
-        ["install", "--config", str(config_path),
-         "--file", str(packages_path)],
+        ["install", "--config", str(config_path), "--file", str(packages_path)],
     )
 
     assert result.exit_code == 0
@@ -525,8 +517,7 @@ def test_install_merges_inline_and_file_packages(
 
     assert result.exit_code == 0
     assert fake_playbook_runner.calls[0]["system_packages"] == ["pkg1", "pkg2"]
-    assert _uploaded_manifest(fake_uploader)[
-        "system_packages"] == ["pkg1", "pkg2"]
+    assert _uploaded_manifest(fake_uploader)["system_packages"] == ["pkg1", "pkg2"]
 
 
 def test_install_records_smoke_test_failure_in_node_results(
@@ -613,8 +604,7 @@ def test_install_records_smoke_test_failure_in_node_results(
     ]
     assert manifest["success_count"] == 3
     assert manifest["failure_count"] == 1
-    assert [node["hostname"]
-            for node in failed_nodes] == ["test-cluster-worker-03"]
+    assert [node["hostname"] for node in failed_nodes] == ["test-cluster-worker-03"]
     assert failed_nodes[0]["errors"] == ["smoke test failed"]
 
 
@@ -626,11 +616,9 @@ def test_install_retains_version_constraint_metadata(
     config_path = _write_config(tmp_path / "install.toml")
     package = "pandas>=2.0"
     playbook_runner = FakePlaybookRunner(
-        responses=[_result_for_all_nodes(
-            success=True, python_packages=[package])]
+        responses=[_result_for_all_nodes(success=True, python_packages=[package])]
     )
-    _, _, fake_uploader = _install_fakes(
-        monkeypatch, playbook_runner=playbook_runner)
+    _, _, fake_uploader = _install_fakes(monkeypatch, playbook_runner=playbook_runner)
 
     result = runner.invoke(
         app,
@@ -678,8 +666,7 @@ def test_install_rollout_records_per_node_results(
             )
         ]
     )
-    _, _, fake_uploader = _install_fakes(
-        monkeypatch, playbook_runner=playbook_runner)
+    _, _, fake_uploader = _install_fakes(monkeypatch, playbook_runner=playbook_runner)
 
     result = runner.invoke(
         app,
@@ -695,7 +682,7 @@ def test_install_rollout_records_per_node_results(
     )
 
     assert result.exit_code == 0
-    node_results = {node["hostname"]                    : node for node in _uploaded_nodes(fake_uploader)}
+    node_results = {node["hostname"]: node for node in _uploaded_nodes(fake_uploader)}
     node_result = node_results["test-cluster-worker-01"]
     assert node_result["success"] is True
     assert node_result["system_installed"] == ["mc"]
@@ -720,8 +707,7 @@ def test_install_marks_node_local_state_as_updated(
     manifest = _uploaded_manifest(fake_uploader)
     assert manifest["success_count"] == 4
     assert manifest["failure_count"] == 0
-    assert all(node["success"]
-               is True for node in _uploaded_nodes(fake_uploader))
+    assert all(node["success"] is True for node in _uploaded_nodes(fake_uploader))
 
 
 def test_install_records_python_import_verification(
@@ -731,11 +717,9 @@ def test_install_records_python_import_verification(
     """Persist imported Python packages as installed per-node results."""
     config_path = _write_config(tmp_path / "install.toml")
     playbook_runner = FakePlaybookRunner(
-        responses=[_result_for_all_nodes(
-            success=True, python_packages=["pandas"])]
+        responses=[_result_for_all_nodes(success=True, python_packages=["pandas"])]
     )
-    _, _, fake_uploader = _install_fakes(
-        monkeypatch, playbook_runner=playbook_runner)
+    _, _, fake_uploader = _install_fakes(monkeypatch, playbook_runner=playbook_runner)
 
     result = runner.invoke(
         app,
@@ -767,10 +751,11 @@ def test_install_routes_workers_via_master_proxyjump(
     worker_hosts = fake_playbook_runner.calls[0]["inventory"]["all"]["children"][
         "worker"
     ]["hosts"]
+    expected_worker_args = (
+        f"-o ProxyJump=ubuntu@198.51.100.10 {ansible_runner_module.SSH_COMMON_ARGS}"
+    )
     assert all(
-        host_vars["ansible_ssh_common_args"]
-        == "-o ProxyJump=ubuntu@198.51.100.10 -o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null"
+        host_vars["ansible_ssh_common_args"] == expected_worker_args
         for host_vars in worker_hosts.values()
     )
 
@@ -794,9 +779,7 @@ def test_install_uses_non_persistent_host_key_options_for_master(
         "master"
     ]["hosts"]
     assert all(
-        host_vars["ansible_ssh_common_args"]
-        == "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        "-o GlobalKnownHostsFile=/dev/null"
+        host_vars["ansible_ssh_common_args"] == ansible_runner_module.SSH_COMMON_ARGS
         for host_vars in master_hosts.values()
     )
 
@@ -822,8 +805,7 @@ def test_install_missing_verification_metadata_marks_node_failed(
     playbook_runner = FakePlaybookRunner(
         responses=[
             [
-                *(_result_for_all_nodes(success=True,
-                  python_packages=["pandas"])[:-1]),
+                *(_result_for_all_nodes(success=True, python_packages=["pandas"])[:-1]),
                 FakeNodeResult(
                     node_name="test-cluster-worker-03",
                     host="10.0.0.23",
@@ -864,8 +846,7 @@ def test_install_missing_verification_metadata_marks_node_failed(
             ],
         ]
     )
-    _, _, fake_uploader = _install_fakes(
-        monkeypatch, playbook_runner=playbook_runner)
+    _, _, fake_uploader = _install_fakes(monkeypatch, playbook_runner=playbook_runner)
 
     result = runner.invoke(
         app,
@@ -879,10 +860,8 @@ def test_install_missing_verification_metadata_marks_node_failed(
     ]
     assert manifest["success_count"] == 3
     assert manifest["failure_count"] == 1
-    assert [node["hostname"]
-            for node in failed_nodes] == ["test-cluster-worker-03"]
-    assert failed_nodes[0]["errors"] == [
-        "python package verification failed: pandas"]
+    assert [node["hostname"] for node in failed_nodes] == ["test-cluster-worker-03"]
+    assert failed_nodes[0]["errors"] == ["python package verification failed: pandas"]
 
 
 def test_install_retries_failed_nodes_with_exponential_backoff(
@@ -895,8 +874,7 @@ def test_install_retries_failed_nodes_with_exponential_backoff(
     playbook_runner = FakePlaybookRunner(
         responses=[
             [
-                *_result_for_all_nodes(success=True,
-                                       python_packages=["pandas"])[:-1],
+                *_result_for_all_nodes(success=True, python_packages=["pandas"])[:-1],
                 FakeNodeResult(
                     node_name="test-cluster-worker-03",
                     host="10.0.0.23",

@@ -143,9 +143,7 @@ def _packer_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
 def _raw_packer_output(result: subprocess.CompletedProcess[str]) -> str:
     """Return all captured Packer output in the order users expect to inspect."""
     outputs = [
-        output.strip()
-        for output in (result.stderr, result.stdout)
-        if output.strip()
+        output.strip() for output in (result.stderr, result.stdout) if output.strip()
     ]
     return "\n".join(outputs)
 

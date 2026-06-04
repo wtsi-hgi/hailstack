@@ -255,8 +255,7 @@ async def _run_ssh_command(
         stdout = stdout_bytes.decode("utf-8")
         stderr = stderr_bytes.decode("utf-8").strip()
         if _looks_like_ssh_auth_error(stderr):
-            raise SSHError(
-                stderr or f"SSH authentication failed for {host.address}")
+            raise SSHError(stderr or f"SSH authentication failed for {host.address}")
         if process.returncode == 255 or _looks_like_ssh_transport_error(stderr):
             if attempt < len(_RETRY_BACKOFF_SECONDS):
                 continue
@@ -327,8 +326,7 @@ def _parse_percent(value: str, *, host: HealthProbeTarget) -> float:
     try:
         percent = float(value)
     except ValueError as error:
-        raise SSHError(
-            f"Unable to parse resource usage for {host.name}") from error
+        raise SSHError(f"Unable to parse resource usage for {host.name}") from error
     if percent < 0.0 or percent > 100.0:
         raise SSHError(f"Unable to parse resource usage for {host.name}")
     return percent
