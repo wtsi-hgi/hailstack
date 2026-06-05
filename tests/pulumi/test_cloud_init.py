@@ -25,6 +25,7 @@
 
 import re
 from email import message_from_string, policy
+from pathlib import Path
 from shlex import quote
 
 import pytest
@@ -36,6 +37,8 @@ from hailstack.pulumi.cloud_init import (
     generate_master_cloud_init,
     generate_worker_cloud_init,
 )
+
+RUNNER_DEFAULT_PUBLIC_KEY = "ssh-rsa DEFAULT runner@test"
 
 
 def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
@@ -696,6 +699,44 @@ def test_worker_cloud_init_installs_all_ssh_keys_during_config_stage() -> None:
     assert "#!/usr/bin/env bash" in shell_script
     assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
     assert "/etc/hadoop/conf/core-site.xml" in shell_script
+
+
+def test_effective_runner_default_key_reaches_master_and_worker_cloud_init(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render the enriched create-time SSH key list into every node."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (ssh_dir / "id_rsa.pub").write_text(
+        RUNNER_DEFAULT_PUBLIC_KEY + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: home)
+    configured_key = "ssh-ed25519 CONFIG configured@test"
+    config = _config(ssh_keys={"public_keys": [configured_key]}).validate_for_command(
+        "create",
+        require_backend=False,
+    )
+    expected_keys = [configured_key, RUNNER_DEFAULT_PUBLIC_KEY]
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    assert _ssh_user_entry(master_result, "ubuntu")["ssh_authorized_keys"] == (
+        expected_keys
+    )
+    assert _ssh_user_entry(worker_result, "ubuntu")["ssh_authorized_keys"] == (
+        expected_keys
+    )
+    assert RUNNER_DEFAULT_PUBLIC_KEY in _cloud_init_part(
+        master_result, "text/x-shellscript"
+    )
+    assert RUNNER_DEFAULT_PUBLIC_KEY in _cloud_init_part(
+        worker_result, "text/x-shellscript"
+    )
 
 
 def test_s3_settings_inject_s3a_properties_into_core_site(

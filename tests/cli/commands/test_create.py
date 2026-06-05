@@ -47,6 +47,7 @@ from hailstack.errors import (
 )
 
 runner = CliRunner()
+RUNNER_DEFAULT_PUBLIC_KEY = "ssh-rsa DEFAULT runner@test"
 
 
 @dataclass
@@ -208,6 +209,8 @@ class FakePulumiRunner:
         self.up_calls = 0
         self.destroy_calls = 0
         self.cleanup_failed_create_calls = 0
+        self.preview_configs: list[object] = []
+        self.up_configs: list[object] = []
 
     def check_backend_access(self, config: object) -> None:
         """Record backend validation and optionally fail."""
@@ -230,7 +233,8 @@ class FakePulumiRunner:
         stack_exists: bool | None = None,
     ) -> str:
         """Return a preview-only Pulumi output string."""
-        del config, bundle, stack_exists
+        del bundle, stack_exists
+        self.preview_configs.append(config)
         self.preview_calls += 1
         return self.preview_output
 
@@ -246,7 +250,8 @@ class FakePulumiRunner:
 
     def up(self, config: object, bundle: object) -> FakeCreateResult:
         """Return a fake create result or fail."""
-        del config, bundle
+        del bundle
+        self.up_configs.append(config)
         self.up_calls += 1
         if self.up_error is not None:
             raise self.up_error
@@ -499,10 +504,23 @@ def _write_config(
     return path
 
 
+def _install_default_public_key(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+    public_key: str = RUNNER_DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Point Path.home at a temp home containing a default public key."""
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (ssh_dir / "id_rsa.pub").write_text(public_key + "\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
 @pytest.fixture
 def command_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point create bundle resolution at a temporary matrix file."""
     matrix_path = _write_bundles(tmp_path / "bundles.toml")
+    _install_default_public_key(monkeypatch, tmp_path / "home")
     monkeypatch.setattr(create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
     return matrix_path
 
@@ -573,6 +591,33 @@ def test_create_apply_outputs_master_floating_ip(
         "Cluster 'test-cluster' created. Master IP: 198.51.100.20"
     )
     assert fake_runner.up_calls == 1
+
+
+def test_create_passes_runner_default_public_key_to_pulumi(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass effective SSH keys, including the runner default, into Pulumi."""
+    del command_matrix
+    configured_key = "ssh-ed25519 CONFIG configured@test"
+    config_path = _write_config(
+        tmp_path / "create.toml",
+        ssh_keys_block=f'[ssh_keys]\npublic_keys = ["{configured_key}"]\n',
+    )
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert len(fake_runner.up_configs) == 1
+    applied_config = fake_runner.up_configs[0]
+    assert isinstance(applied_config, create_module.ClusterConfig)
+    assert applied_config.ssh_keys.public_keys == [
+        configured_key,
+        RUNNER_DEFAULT_PUBLIC_KEY,
+    ]
 
 
 def test_create_raises_image_not_found_with_build_image_hint(

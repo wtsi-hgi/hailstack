@@ -29,6 +29,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from hailstack.config.ssh_keys import effective_create_public_keys
 from hailstack.errors import ConfigError
 
 CLUSTER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
@@ -318,8 +319,14 @@ class ClusterConfig(BaseModel):
         ):
             raise ConfigError("Ceph S3 credentials required for Pulumi state backend")
 
-        if command == "create" and not self.ssh_keys.public_keys:
-            raise ConfigError("ssh_keys.public_keys required")
+        if command == "create":
+            self.ssh_keys = self.ssh_keys.model_copy(
+                update={
+                    "public_keys": effective_create_public_keys(
+                        self.ssh_keys.public_keys
+                    )
+                }
+            )
 
         return self
 
