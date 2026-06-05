@@ -274,6 +274,69 @@ def test_run_ssh_command_passes_explicit_ssh_key(
     assert str(ssh_key_path) in captured_args
 
 
+def test_run_ssh_command_uses_safe_proxy_command_for_jump_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Carry safe SSH options through the master jump connection."""
+    captured_args: list[str] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"ok\n", b""
+
+    async def fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        del kwargs
+        captured_args.extend(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    ssh_key_path = tmp_path / "cluster key"
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(
+                name="worker-01",
+                address="10.0.1.20",
+                jump_host="198.51.100.10",
+            ),
+            "ubuntu",
+            ("true",),
+            ssh_key_path=ssh_key_path,
+        )
+    )
+
+    proxy_option = next(arg for arg in captured_args if arg.startswith("ProxyCommand="))
+    proxy_command = proxy_option.removeprefix("ProxyCommand=")
+    assert result == "ok\n"
+    assert "-J" not in captured_args
+    assert shlex.split(proxy_command) == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-i",
+        str(ssh_key_path),
+        "-W",
+        "%h:%p",
+        "ubuntu@198.51.100.10",
+    ]
+
+
 def test_run_ssh_command_quotes_complex_remote_commands_as_single_ssh_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
