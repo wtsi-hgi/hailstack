@@ -75,6 +75,15 @@ def _cloud_config_users(rendered_cloud_init: str) -> list[object]:
     return users
 
 
+def _cloud_config_document(rendered_cloud_init: str) -> dict[str, object]:
+    """Return the parsed cloud-config document from rendered user-data."""
+    cloud_config = _cloud_init_part(rendered_cloud_init, "text/cloud-config")
+    assert cloud_config.startswith("#cloud-config\n")
+    parsed = yaml.safe_load(cloud_config.removeprefix("#cloud-config\n"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 def _ssh_user_entry(rendered_cloud_init: str, username: str) -> dict[str, object]:
     """Return the configured cloud-config user entry by username."""
     for user in _cloud_config_users(rendered_cloud_init):
@@ -845,6 +854,51 @@ def test_lustre_network_uses_configured_mount_target(
         in result
     )
     assert "mountpoint -q /lustre || mount /lustre" in result
+
+
+def test_lustre_cloud_init_replaces_baked_mounts_before_final_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent baked site-wide Lustre mounts from blocking cloud-init final."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+        shell_script = _cloud_init_part(rendered_cloud_init, "text/x-shellscript")
+
+        assert "systemctl kill --kill-whom=all mountLustre.service || true" in (
+            joined_bootcmd
+        )
+        assert "systemctl mask mountLustre.service || true" in joined_bootcmd
+        assert "awk '$3 != \"lustre\" { print }' /etc/fstab" in joined_bootcmd
+        assert (
+            "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26 "
+            "/lustre lustre defaults,_netdev 0 0"
+        ) in joined_bootcmd
+        assert "systemctl mask mountLustre.service || true" in shell_script
+        assert shell_script.index("awk '$3 != \"lustre\" { print }' /etc/fstab") < (
+            shell_script.index("mountpoint -q /lustre || mount /lustre")
+        )
 
 
 def test_nginx_config_is_written_only_to_sites_enabled_path(

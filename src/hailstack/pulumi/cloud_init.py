@@ -47,6 +47,7 @@ SSL_KEY_PATH = "/etc/nginx/ssl/hailstack.key"
 VOLUME_KEY_PATH = "/etc/hailstack/volume.key"
 VOLUME_DEVICE_PATH = "/etc/hailstack/volume-device"
 VOLUME_UUID_PATH = "/etc/hailstack/volume-uuid"
+BAKED_LUSTRE_SERVICE = "mountLustre.service"
 BASE_VENV_PATH = "/opt/hailstack/base-venv"
 OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
 RUNTIME_PYTHON_PATH = f"{OVERLAY_VENV_PATH}/bin/python"
@@ -141,16 +142,17 @@ def _authorized_keys_content(config: ClusterConfig) -> str:
     return "\n".join(config.ssh_keys.public_keys) + "\n"
 
 
-def _ssh_keys_cloud_config(config: ClusterConfig) -> str:
-    """Render config-stage SSH key installation for the login user."""
+def _cloud_config(config: ClusterConfig) -> str:
+    """Render early boot and config-stage cloud-init settings."""
     payload = {
+        "bootcmd": _baked_lustre_cleanup_commands(config),
         "users": [
             "default",
             {
                 "name": config.cluster.ssh_username,
                 "ssh_authorized_keys": list(config.ssh_keys.public_keys),
             },
-        ]
+        ],
     }
     return "#cloud-config\n" + yaml.safe_dump(
         payload,
@@ -580,17 +582,44 @@ def _volume_commands(
     return commands
 
 
+def _configured_lustre_fstab_command(config: ClusterConfig) -> str | None:
+    """Render the configured Lustre fstab append command, when enabled."""
+    if not config.cluster.lustre_network.strip():
+        return None
+    return (
+        "grep -q '^"
+        + config.cluster.lustre_mount_target
+        + " /lustre lustre ' /etc/fstab || echo '"
+        + config.cluster.lustre_mount_target
+        + " /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
+    )
+
+
+def _baked_lustre_cleanup_commands(config: ClusterConfig) -> list[str]:
+    """Render commands that neutralize baked site-wide Lustre boot behavior."""
+    commands = [
+        f"systemctl kill --kill-whom=all {BAKED_LUSTRE_SERVICE} || true",
+        f"systemctl stop --no-block {BAKED_LUSTRE_SERVICE} || true",
+        f"systemctl disable {BAKED_LUSTRE_SERVICE} || true",
+        f"systemctl mask {BAKED_LUSTRE_SERVICE} || true",
+        "awk '$3 != \"lustre\" { print }' /etc/fstab > /etc/fstab.hailstack "
+        "&& cat /etc/fstab.hailstack > /etc/fstab "
+        "&& rm -f /etc/fstab.hailstack",
+    ]
+    configured_lustre = _configured_lustre_fstab_command(config)
+    if configured_lustre is not None:
+        commands.append(configured_lustre)
+    commands.append("systemctl daemon-reload || true")
+    return commands
+
+
 def _lustre_commands(config: ClusterConfig) -> list[str]:
     """Render optional Lustre mount commands."""
     if not config.cluster.lustre_network.strip():
         return []
     return [
+        *_baked_lustre_cleanup_commands(config),
         "install -d -m 0755 /lustre",
-        "grep -q '^"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre ' /etc/fstab || echo '"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre defaults,_netdev 0 0' >> /etc/fstab",
         "mountpoint -q /lustre || mount /lustre",
     ]
 
@@ -753,7 +782,7 @@ def generate_master_cloud_init(
         *_service_commands(config),
     ]
     shell_script = "\n".join(commands) + "\n"
-    return _cloud_init_multipart(_ssh_keys_cloud_config(config), shell_script)
+    return _cloud_init_multipart(_cloud_config(config), shell_script)
 
 
 def generate_worker_cloud_init(
@@ -806,7 +835,7 @@ def generate_worker_cloud_init(
         *_worker_service_commands(config),
     ]
     shell_script = "\n".join(commands) + "\n"
-    return _cloud_init_multipart(_ssh_keys_cloud_config(config), shell_script)
+    return _cloud_init_multipart(_cloud_config(config), shell_script)
 
 
 __all__ = ["generate_master_cloud_init", "generate_worker_cloud_init"]
