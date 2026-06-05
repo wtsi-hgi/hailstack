@@ -39,13 +39,18 @@ from hailstack.packer.builder import (
     PACKER_TEMPLATE_PATH,
     REQUIRED_PACKER_SCRIPT_PATHS,
     _packer_vars,
+    _resolve_openstack_network_id,
     build_image,
 )
+
+NETWORK_UUID = "11111111-2222-3333-4444-555555555555"
+RESOLVED_NETWORK_UUID = "22222222-3333-4444-5555-666666666666"
 
 
 def _write_config(
     path: Path,
     *,
+    network_name: str = NETWORK_UUID,
     cluster_floating_ip_pool: str = "",
     packer_floating_ip_pool: str = "public",
 ) -> Path:
@@ -65,7 +70,7 @@ def _write_config(
             "[cluster]\n"
             'name = "test-cluster"\n'
             'master_flavour = "m2.medium"\n'
-            'network_name = "private-net"\n'
+            f'network_name = "{network_name}"\n'
             f"{cluster_pool_line}"
             'ssh_username = "ubuntu"\n\n'
             "[packer]\n"
@@ -130,6 +135,181 @@ def _write_template_assets(tmp_path: Path) -> Path:
     return template_path
 
 
+def test_build_image_resolves_network_name_to_uuid_before_packer(
+    tmp_path: Path,
+) -> None:
+    """Pass Packer the UUID for a configured OpenStack network name."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", network_name="cloudforms_network")
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+    requested_networks: list[str] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    def fake_network_resolver(network_name: str) -> str:
+        requested_networks.append(network_name)
+        return RESOLVED_NETWORK_UUID
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        network_resolver=fake_network_resolver,
+    )
+
+    command = recorded_commands[0]
+    assert requested_networks == ["cloudforms_network"]
+    assert f"network={RESOLVED_NETWORK_UUID}" in command
+    assert "network=cloudforms_network" not in command
+
+
+def test_build_image_fails_before_runner_when_network_name_cannot_resolve(
+    tmp_path: Path,
+) -> None:
+    """Raise a clear PackerError before Packer launches with a bad network."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", network_name="cloudforms_network")
+    )
+    template_path = _write_template_assets(tmp_path)
+    runner_called = False
+
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("runner should not be called")
+
+    def fail_network_resolver(network_name: str) -> str:
+        raise PackerError(
+            f"Could not resolve OpenStack network '{network_name}' to the UUID "
+            "Packer requires. Run `openstack network list` and check "
+            "OpenStack credentials."
+        )
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fail_runner,
+            template_path=template_path,
+            network_resolver=fail_network_resolver,
+        )
+
+    message = str(raised.value)
+    assert "cloudforms_network" in message
+    assert "openstack network list" in message
+    assert "credentials" in message
+    assert not runner_called
+
+
+def test_build_image_passes_configured_network_uuid_without_resolver_call(
+    tmp_path: Path,
+) -> None:
+    """Keep existing UUID-based cluster.network_name configs working."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    def fail_network_resolver(network_name: str) -> str:
+        raise AssertionError(f"resolver should not be called for {network_name}")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        network_resolver=fail_network_resolver,
+    )
+
+    assert f"network={NETWORK_UUID}" in recorded_commands[0]
+
+
+def test_openstack_network_resolver_returns_cli_network_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve a friendly network name through the OpenStack CLI JSON output."""
+    recorded_commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output
+        assert text
+        assert not check
+        recorded_commands.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=f'{{"id": "{RESOLVED_NETWORK_UUID}"}}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _resolve_openstack_network_id("cloudforms_network") == RESOLVED_NETWORK_UUID
+    assert recorded_commands == [
+        ["openstack", "network", "show", "cloudforms_network", "-f", "json"]
+    ]
+
+
+def test_openstack_network_resolver_failure_names_network_and_suggests_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explain network lookup failures before Packer reaches Nova."""
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, check
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=1,
+            stdout="",
+            stderr="No Network found for cloudforms_network",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(PackerError) as raised:
+        _resolve_openstack_network_id("cloudforms_network")
+
+    message = str(raised.value)
+    assert "cloudforms_network" in message
+    assert "openstack network list" in message
+    assert "credentials" in message
+
+
 def _repo_template_script_entries() -> set[str]:
     """Return shell provisioner script entries from the checked-in template."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -165,7 +345,7 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert "base_image=ubuntu-22.04" in command
     assert "ssh_username=ubuntu" in command
     assert "flavor=m2.large" in command
-    assert "network=private-net" in command
+    assert f"network={NETWORK_UUID}" in command
     assert "floating_ip_pool=public" in command
     assert not any(argument.startswith("image_name=") for argument in command)
 
@@ -354,7 +534,7 @@ def test_builder_vars_match_checked_in_template_contract(tmp_path: Path) -> None
     config = load_config(_write_config(tmp_path / "cluster.toml"))
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
     declared_vars = set(re.findall(r'variable "([^"]+)"', template))
-    builder_vars = set(_packer_vars(config, _bundle()))
+    builder_vars = set(_packer_vars(config, _bundle(), network_id=NETWORK_UUID))
 
     assert builder_vars == declared_vars
     assert 'image_name       = "hailstack-${var.bundle_id}"' in template
@@ -865,7 +1045,7 @@ def test_e2_bundle_versions_flow_into_provisioner_environment_vars(
 ) -> None:
     """Map bundle versions into the template contract used by shell provisioners."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
-    variables = _packer_vars(config, bundle)
+    variables = _packer_vars(config, bundle, network_id=NETWORK_UUID)
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     for env_name, expected_value in expected_pairs.items():

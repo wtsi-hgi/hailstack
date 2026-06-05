@@ -23,6 +23,7 @@
 
 """Run Packer builds for Hailstack images."""
 
+import json
 import logging
 import os
 import subprocess
@@ -30,6 +31,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from hailstack.config.compatibility import Bundle
 from hailstack.config.schema import ClusterConfig, PackerConfig
@@ -78,6 +82,22 @@ class PackerRunner(Protocol):
         ...
 
 
+class NetworkResolver(Protocol):
+    """Define the callable shape used to resolve OpenStack network IDs."""
+
+    def __call__(self, network_name: str) -> str:
+        """Resolve a configured network name to an OpenStack UUID."""
+        ...
+
+
+class _OpenStackNetworkShow(BaseModel):
+    """Represent the fields Hailstack needs from OpenStack network JSON."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(validation_alias=AliasChoices("id", "ID"))
+
+
 def _run_packer(
     command: list[str],
     *,
@@ -93,7 +113,12 @@ def _run_packer(
     )
 
 
-def _packer_vars(config: ClusterConfig, bundle: Bundle) -> dict[str, str]:
+def _packer_vars(
+    config: ClusterConfig,
+    bundle: Bundle,
+    *,
+    network_id: str,
+) -> dict[str, str]:
     """Build the documented Packer variable mapping for a bundle."""
     packer_config = config.validate_for_command("build-image").packer
     assert packer_config is not None
@@ -111,9 +136,93 @@ def _packer_vars(config: ClusterConfig, bundle: Bundle) -> dict[str, str]:
         "base_image": packer_config.base_image,
         "ssh_username": config.cluster.ssh_username,
         "flavor": packer_config.flavour,
-        "network": config.cluster.network_name,
+        "network": network_id,
         "floating_ip_pool": floating_ip_pool,
     }
+
+
+def _resolve_packer_network_id(
+    configured_network: str,
+    network_resolver: NetworkResolver,
+) -> str:
+    """Return the OpenStack network UUID expected by Packer."""
+    network_name_or_id = configured_network.strip()
+    if not network_name_or_id:
+        raise PackerError("cluster.network_name is required for build-image")
+    if _is_uuid(network_name_or_id):
+        return network_name_or_id
+
+    network_id = network_resolver(network_name_or_id).strip()
+    if not _is_uuid(network_id):
+        raise _network_resolution_error(
+            network_name_or_id,
+            f"OpenStack network resolver returned non-UUID id `{network_id}`.",
+        )
+    return network_id
+
+
+def _is_uuid(value: str) -> bool:
+    """Return whether a string is already a UUID-shaped network ID."""
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_openstack_network_id(network_name: str) -> str:
+    """Resolve an OpenStack network name to the UUID Packer requires."""
+    try:
+        result = subprocess.run(
+            ["openstack", "network", "show", network_name, "-f", "json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise _network_resolution_error(
+            network_name,
+            "The `openstack` CLI was not found on PATH.",
+        ) from error
+
+    if result.returncode != 0:
+        detail = _raw_packer_output(result)
+        if detail:
+            detail = f"OpenStack CLI output: {detail}"
+        else:
+            detail = f"OpenStack CLI exited with status {result.returncode}."
+        raise _network_resolution_error(network_name, detail)
+
+    return _parse_openstack_network_id(network_name, result.stdout)
+
+
+def _parse_openstack_network_id(network_name: str, output: str) -> str:
+    """Parse and validate an OpenStack network UUID from CLI JSON output."""
+    try:
+        network = _OpenStackNetworkShow.model_validate_json(output)
+    except (json.JSONDecodeError, ValidationError) as error:
+        raise _network_resolution_error(
+            network_name,
+            "OpenStack CLI returned JSON without an `id` field.",
+        ) from error
+
+    network_id = network.id.strip()
+    if not _is_uuid(network_id):
+        raise _network_resolution_error(
+            network_name,
+            f"OpenStack CLI returned non-UUID network id `{network.id}`.",
+        )
+
+    return network_id
+
+
+def _network_resolution_error(network_name: str, detail: str) -> PackerError:
+    """Build a clear network-resolution PackerError."""
+    return PackerError(
+        f"Could not resolve OpenStack network '{network_name}' to the UUID "
+        "Packer requires. Run `openstack network list` to verify the network "
+        f"name and check OpenStack credentials. {detail}"
+    )
 
 
 def _packer_floating_ip_pool(
@@ -135,6 +244,7 @@ def _packer_floating_ip_pool(
 def _log_packer_networking(
     logger: logging.Logger,
     config: ClusterConfig,
+    network_id: str,
 ) -> None:
     """Log Packer networking choices without exposing credentials."""
     packer_config = config.validate_for_command("build-image").packer
@@ -142,6 +252,7 @@ def _log_packer_networking(
     floating_ip_pool, source = _packer_floating_ip_pool(config, packer_config)
 
     logger.info("Packer OpenStack network: %s", config.cluster.network_name)
+    logger.info("Packer OpenStack network UUID: %s", network_id)
     if floating_ip_pool:
         logger.info("Packer floating IP pool: %s (%s)", floating_ip_pool, source)
         return
@@ -309,17 +420,25 @@ def build_image(
     runner: PackerRunner = _run_packer,
     template_path: Path = PACKER_TEMPLATE_PATH,
     logger: logging.Logger | None = None,
+    network_resolver: NetworkResolver = _resolve_openstack_network_id,
 ) -> str:
     """Run packer build using config.packer settings and return the image ID."""
     active_logger = logger or logging.getLogger(__name__)
     resolved_template_path = template_path.resolve()
     _validate_packer_assets(resolved_template_path)
-    _log_packer_networking(active_logger, config)
+    network_id = _resolve_packer_network_id(
+        config.cluster.network_name,
+        network_resolver,
+    )
+    _log_packer_networking(active_logger, config, network_id)
     active_logger.info("Packer starting")
 
     with _normalized_relative_packer_log_path():
         result = runner(
-            _packer_command(resolved_template_path, _packer_vars(config, bundle)),
+            _packer_command(
+                resolved_template_path,
+                _packer_vars(config, bundle, network_id=network_id),
+            ),
             cwd=resolved_template_path.parent,
         )
     if result.returncode != 0:
