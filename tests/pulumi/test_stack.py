@@ -70,7 +70,7 @@ class FakeAutoStack:
         }
 
 
-def _config() -> ClusterConfig:
+def _config(*, endpoint: str = "https://ceph.example.invalid") -> ClusterConfig:
     """Return the subset of config the runner needs for tests."""
     return cast(
         ClusterConfig,
@@ -78,7 +78,7 @@ def _config() -> ClusterConfig:
             cluster=SimpleNamespace(name="test-cluster"),
             ceph_s3=SimpleNamespace(
                 bucket="hailstack-state",
-                endpoint="https://ceph.example.invalid",
+                endpoint=endpoint,
                 access_key="state-access",
                 secret_key="state-secret",
             ),
@@ -377,6 +377,61 @@ def test_pulumi_env_preserves_explicit_pulumi_home(
     env = runner._pulumi_env(_config())
 
     assert env["PULUMI_HOME"] == "/tmp/custom-pulumi-home"
+
+
+def test_backend_access_normalizes_bare_ceph_endpoint_and_defaults_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login to documented bare Ceph endpoints with a valid S3 region."""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    captured_args: list[list[str]] = []
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del capture_output, check, cwd, text
+        captured_args.append(args)
+        captured_envs.append(env)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    stack_module.AutomationStackRunner().check_backend_access(
+        _config(endpoint="cog.sanger.ac.uk")
+    )
+
+    assert captured_args == [
+        [
+            "pulumi",
+            "login",
+            "--non-interactive",
+            "s3://hailstack-state?endpoint=https://cog.sanger.ac.uk",
+        ]
+    ]
+    assert captured_envs[0]["AWS_REGION"] == "us-east-1"
+    assert captured_envs[0]["AWS_DEFAULT_REGION"] == "us-east-1"
+
+
+def test_pulumi_env_uses_caller_s3_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect a caller-provided S3 backend region."""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-2")
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["AWS_REGION"] == "eu-west-2"
+    assert env["AWS_DEFAULT_REGION"] == "eu-west-2"
 
 
 def test_cli_env_matches_automation_env(monkeypatch: pytest.MonkeyPatch) -> None:

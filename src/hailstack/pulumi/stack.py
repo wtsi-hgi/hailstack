@@ -313,13 +313,15 @@ class AutomationStackRunner:
     @staticmethod
     def _backend_url(config: ClusterConfig) -> str:
         """Render the documented Pulumi Ceph backend URL."""
-        return f"s3://{config.ceph_s3.bucket}?endpoint={config.ceph_s3.endpoint}"
+        endpoint = _normalize_ceph_endpoint(config.ceph_s3.endpoint)
+        return f"s3://{config.ceph_s3.bucket}?endpoint={endpoint}"
 
     def _pulumi_env(self, config: ClusterConfig) -> dict[str, str]:
         """Build the process environment required for Pulumi backend access."""
         env = dict(os.environ)
         env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
         env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
+        _set_default_s3_region(env)
         env.setdefault("PULUMI_HOME", str(self._pulumi_home()))
         return env
 
@@ -343,6 +345,23 @@ def _is_missing_stack_error(error: Exception) -> bool:
     """Return true when the Pulumi automation error indicates no stack exists."""
     message = str(error).lower()
     return "not found" in message or "no stack named" in message
+
+
+def _normalize_ceph_endpoint(endpoint: str) -> str:
+    """Return a Pulumi-compatible Ceph endpoint URL."""
+    normalized_endpoint = endpoint.rstrip("/")
+    if "://" not in normalized_endpoint:
+        return f"https://{normalized_endpoint}"
+    return normalized_endpoint
+
+
+def _set_default_s3_region(env: dict[str, str]) -> None:
+    """Populate S3 region variables required by Pulumi's S3 backend."""
+    region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
+    if not env.get("AWS_REGION"):
+        env["AWS_REGION"] = region
+    if not env.get("AWS_DEFAULT_REGION"):
+        env["AWS_DEFAULT_REGION"] = region
 
 
 def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
