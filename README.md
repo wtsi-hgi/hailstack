@@ -143,7 +143,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    chmod 600 .env
    ```
 
-4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. If `cluster.lustre_network` is set, the temporary instance is attached to that resolved network as a second interface. SSH must be reachable from the runner either through the management network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`. Floating-IP builds create temporary ports so SSH ingress is applied only to the management interface, then delete those ports and the temporary SSH security group after Packer exits.
+4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. If `cluster.lustre_network` is set, the temporary instance is attached to that resolved network as a second interface. SSH must be reachable from the runner either through the management network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`. Floating-IP builds create a temporary management port so SSH ingress is applied only to that interface, then delete that port and the temporary SSH security group after Packer exits.
 
    ```bash
    hailstack build-image --config my-cluster.toml --dotenv .env
@@ -202,9 +202,9 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 
 For secure Lustre, both values are site-specific. `cluster.lustre_network`
 must be the OpenStack network that can reach Lustre; Hailstack adds a second
-Neutron port on that network to every node and to temporary Packer build
-instances. With OpenStack credentials loaded, list the networks your project
-can see:
+Neutron port on that network to every cluster node and attaches temporary
+Packer build instances to that network too. With OpenStack credentials loaded,
+list the networks your project can see:
 
 ```bash
 openstack network list
@@ -374,7 +374,7 @@ hailstack reboot --config my-cluster.toml --dotenv .env --node my-cluster-worker
 
 Synopsis: Build a Hailstack image for a selected compatibility bundle.
 
-Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. When `cluster.lustre_network` is non-blank, Hailstack resolves that network too and attaches it as a second interface; blank or whitespace-only values keep the previous single-network build. The machine running `hailstack build-image` must be able to SSH to the instance through the management network or a floating IP pool. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool. When a floating IP pool is in use, Hailstack creates a temporary `hailstack-packer-ssh-*` security group with TCP/22 ingress, attaches it only to the management port, attaches any Lustre port without security groups, and deletes the temporary ports before deleting the security group.
+Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. When `cluster.lustre_network` is non-blank, Hailstack resolves that network too and attaches it as a second interface; blank or whitespace-only values keep the previous single-network build. The machine running `hailstack build-image` must be able to SSH to the instance through the management network or a floating IP pool. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool. When a floating IP pool is in use, Hailstack creates a temporary `hailstack-packer-ssh-*` security group with TCP/22 ingress, attaches it only to a temporary management port, attaches the Lustre network by UUID when configured, and deletes the temporary port before deleting the security group.
 
 Options:
 

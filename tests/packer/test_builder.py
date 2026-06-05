@@ -55,7 +55,6 @@ LUSTRE_NETWORK_UUID = "33333333-4444-5555-6666-777777777777"
 RESOLVED_NETWORK_UUID = "22222222-3333-4444-5555-666666666666"
 RESOLVED_LUSTRE_NETWORK_UUID = "44444444-5555-6666-7777-888888888888"
 MANAGEMENT_PORT_UUID = "55555555-6666-7777-8888-999999999999"
-LUSTRE_PORT_UUID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 PACKER_APT_HELPER_RELATIVE_PATH = Path("scripts/apt-locks.sh")
 PACKER_APT_HELPER_PATH = PACKER_ROOT_PATH / PACKER_APT_HELPER_RELATIVE_PATH
 PACKER_REMOTE_APT_HELPER_PATH = "/tmp/hailstack-packer-apt-locks.sh"
@@ -202,17 +201,6 @@ class _RecordingPortManager:
             )
         self.events.append(f"port:create-management:{network_id}:{security_group_name}")
         return MANAGEMENT_PORT_UUID
-
-    def create_lustre_port(self, *, network_id: str) -> str:
-        """Create a fake Lustre port without security groups."""
-        if self.fail_create == "lustre":
-            raise PackerError(
-                "Could not create temporary Packer Lustre port before "
-                "launching Packer. Check OpenStack port/security group "
-                "quota/permissions and credentials."
-            )
-        self.events.append(f"port:create-lustre:{network_id}")
-        return LUSTRE_PORT_UUID
 
     def cleanup(self, port_id: str) -> None:
         """Delete a fake temporary port."""
@@ -664,6 +652,13 @@ def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> No
     assert 'var.lustre_network == ""' in template
     assert "[var.network]" in template
     assert "[var.network, var.lustre_network]" in template
+    expected_networks_local = (
+        'packer_networks         = var.ports == "" ? '
+        '(var.lustre_network == "" ? [var.network] : '
+        "[var.network, var.lustre_network]) : "
+        '(var.lustre_network == "" ? null : [var.lustre_network])'
+    )
+    assert expected_networks_local in template
     assert re.search(
         r"^\s*networks\s*=\s*local\.packer_networks\s*$",
         source_block["body"],
@@ -812,7 +807,7 @@ def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
 def test_build_image_uses_temporary_ports_for_floating_ip_build(
     tmp_path: Path,
 ) -> None:
-    """Apply SSH ingress only to the management port for floating IP builds."""
+    """Use one explicit management port while still attaching Lustre by network."""
     config = load_config(
         _write_config(
             tmp_path / "cluster.toml",
@@ -856,45 +851,20 @@ def test_build_image_uses_temporary_ports_for_floating_ip_build(
     assert events == [
         "sg:create",
         f"port:create-management:{RESOLVED_NETWORK_UUID}:hailstack-packer-ssh-test",
-        f"port:create-lustre:{RESOLVED_LUSTRE_NETWORK_UUID}",
         "runner",
-        f"port:cleanup:{LUSTRE_PORT_UUID}",
         f"port:cleanup:{MANAGEMENT_PORT_UUID}",
         "sg:cleanup:hailstack-packer-ssh-test",
     ]
     command = recorded_commands[0]
     assert "floating_ip_pool=public" in command
-    assert f"ports={MANAGEMENT_PORT_UUID},{LUSTRE_PORT_UUID}" in command
+    assert f"ports={MANAGEMENT_PORT_UUID}" in command
+    assert f"lustre_network={RESOLVED_LUSTRE_NETWORK_UUID}" in command
+    assert not any("port:create-lustre" in event for event in events)
     assert "ssh_security_group=hailstack-packer-ssh-test" not in command
 
 
-@pytest.mark.parametrize(
-    ("fail_create", "expected_events"),
-    [
-        pytest.param(
-            "management",
-            [
-                "sg:create",
-                "sg:cleanup:hailstack-packer-ssh-test",
-            ],
-            id="management",
-        ),
-        pytest.param(
-            "lustre",
-            [
-                "sg:create",
-                f"port:create-management:{NETWORK_UUID}:hailstack-packer-ssh-test",
-                f"port:cleanup:{MANAGEMENT_PORT_UUID}",
-                "sg:cleanup:hailstack-packer-ssh-test",
-            ],
-            id="lustre",
-        ),
-    ],
-)
 def test_build_image_cleans_up_before_runner_when_temporary_port_creation_fails(
     tmp_path: Path,
-    fail_create: str,
-    expected_events: list[str],
 ) -> None:
     """Clean up partial floating-IP setup when temporary port creation fails."""
     config = load_config(
@@ -907,7 +877,7 @@ def test_build_image_cleans_up_before_runner_when_temporary_port_creation_fails(
     template_path = _write_template_assets(tmp_path)
     events: list[str] = []
     security_groups = _SharedRecordingSecurityGroupManager(events)
-    ports = _RecordingPortManager(events, fail_create=fail_create)
+    ports = _RecordingPortManager(events, fail_create="management")
     runner_called = False
 
     def fail_runner(
@@ -932,13 +902,16 @@ def test_build_image_cleans_up_before_runner_when_temporary_port_creation_fails(
 
     assert not runner_called
     assert "OpenStack port/security group quota/permissions" in str(raised.value)
-    assert events == expected_events
+    assert events == [
+        "sg:create",
+        "sg:cleanup:hailstack-packer-ssh-test",
+    ]
 
 
-def test_openstack_build_port_manager_creates_ports_with_expected_security(
+def test_openstack_build_port_manager_creates_management_port_with_ssh_security(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Create management and Lustre ports with interface-specific security."""
+    """Create only the management port with SSH security for Packer ports."""
     openstack_commands: list[list[str]] = []
 
     monkeypatch.setattr(
@@ -958,13 +931,10 @@ def test_openstack_build_port_manager_creates_ports_with_expected_security(
         assert text
         assert not check
         openstack_commands.append(command)
-        port_id = (
-            MANAGEMENT_PORT_UUID if "management" in command[-3] else LUSTRE_PORT_UUID
-        )
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
-            stdout=f'{{"id": "{port_id}"}}\n',
+            stdout=f'{{"id": "{MANAGEMENT_PORT_UUID}"}}\n',
             stderr="",
         )
 
@@ -975,17 +945,15 @@ def test_openstack_build_port_manager_creates_ports_with_expected_security(
         network_id=RESOLVED_NETWORK_UUID,
         security_group_name="hailstack-packer-ssh-test",
     )
-    lustre_port_id = manager.create_lustre_port(
-        network_id=RESOLVED_LUSTRE_NETWORK_UUID,
-    )
-    manager.cleanup(lustre_port_id)
     manager.cleanup(management_port_id)
 
     assert management_port_id == MANAGEMENT_PORT_UUID
-    assert lustre_port_id == LUSTRE_PORT_UUID
-    lustre_create_command = openstack_commands[1]
-    assert "--no-security-group" in lustre_create_command
-    assert "--disable-port-security" not in lustre_create_command
+    assert not any(
+        "--disable-port-security" in command for command in openstack_commands
+    )
+    assert not any(
+        "hailstack-packer-lustre-aaaaaaaa" in command for command in openstack_commands
+    )
     assert openstack_commands == [
         [
             "openstack",
@@ -1005,23 +973,6 @@ def test_openstack_build_port_manager_creates_ports_with_expected_security(
         [
             "openstack",
             "port",
-            "create",
-            "--network",
-            RESOLVED_LUSTRE_NETWORK_UUID,
-            "--no-security-group",
-            "hailstack-packer-lustre-aaaaaaaa",
-            "-f",
-            "json",
-        ],
-        [
-            "openstack",
-            "port",
-            "delete",
-            LUSTRE_PORT_UUID,
-        ],
-        [
-            "openstack",
-            "port",
             "delete",
             MANAGEMENT_PORT_UUID,
         ],
@@ -1036,6 +987,7 @@ def test_build_image_creates_temporary_ssh_port_for_floating_ip_build(
     config = load_config(
         _write_config(
             tmp_path / "cluster.toml",
+            lustre_network=LUSTRE_NETWORK_UUID,
             cluster_floating_ip_pool="public",
             packer_floating_ip_pool="",
         )
@@ -1155,6 +1107,7 @@ def test_build_image_creates_temporary_ssh_port_for_floating_ip_build(
     command = recorded_commands[0]
     assert "floating_ip_pool=public" in command
     assert f"ports={MANAGEMENT_PORT_UUID}" in command
+    assert f"lustre_network={LUSTRE_NETWORK_UUID}" in command
     assert f"ssh_security_group={security_group_name}" not in command
     assert not any("cloudforms_ssh_in" in argument for argument in command)
 

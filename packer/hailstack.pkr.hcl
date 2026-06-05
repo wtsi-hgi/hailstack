@@ -72,7 +72,7 @@ variable "ports" {
 }
 
 locals {
-  packer_networks         = var.ports == "" ? (var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]) : null
+  packer_networks         = var.ports == "" ? (var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]) : (var.lustre_network == "" ? null : [var.lustre_network])
   packer_ports            = var.ports == "" ? null : split(",", var.ports)
   packer_security_groups = var.ports == "" ? ["default"] : null
 }

@@ -90,7 +90,6 @@ _PACKER_SSH_SECURITY_GROUP_DESCRIPTION = (
     "Temporary Hailstack Packer SSH access for image build"
 )
 _PACKER_MANAGEMENT_PORT_NAME_PREFIX = "hailstack-packer-management-"
-_PACKER_LUSTRE_PORT_NAME_PREFIX = "hailstack-packer-lustre-"
 _NO_ROUTE_TO_HOST_RE = re.compile(
     r"dial tcp (?P<host>[^:\s]+):(?P<port>\d+): connect: no route to host",
     re.IGNORECASE,
@@ -144,10 +143,6 @@ class BuildPortManager(Protocol):
         security_group_name: str,
     ) -> str:
         """Create the management port and return its port UUID."""
-        ...
-
-    def create_lustre_port(self, *, network_id: str) -> str:
-        """Create the Lustre port and return its port UUID."""
         ...
 
     def cleanup(self, port_id: str) -> None:
@@ -272,24 +267,6 @@ class _OpenStackBuildPortManager:
                 "json",
             ],
             action=f"create temporary Packer management port `{name}`",
-        )
-
-    def create_lustre_port(self, *, network_id: str) -> str:
-        """Create the Lustre port without security groups."""
-        name = _temporary_packer_port_name(_PACKER_LUSTRE_PORT_NAME_PREFIX)
-        return _run_openstack_port_create_command(
-            [
-                "openstack",
-                "port",
-                "create",
-                "--network",
-                network_id,
-                "--no-security-group",
-                name,
-                "-f",
-                "json",
-            ],
-            action=f"create temporary Packer Lustre port `{name}`",
         )
 
     def cleanup(self, port_id: str) -> None:
@@ -1103,7 +1080,6 @@ def _temporary_packer_networking(
     *,
     floating_ip_pool: str,
     network_id: str,
-    lustre_network_id: str,
     security_group_manager: BuildSecurityGroupManager,
     port_manager: BuildPortManager,
     logger: logging.Logger,
@@ -1119,7 +1095,6 @@ def _temporary_packer_networking(
     try:
         _create_temporary_packer_ports(
             network_id=network_id,
-            lustre_network_id=lustre_network_id,
             security_group_name=security_group_name,
             port_manager=port_manager,
             logger=logger,
@@ -1148,25 +1123,18 @@ def _temporary_packer_networking(
 def _create_temporary_packer_ports(
     *,
     network_id: str,
-    lustre_network_id: str,
     security_group_name: str,
     port_manager: BuildPortManager,
     logger: logging.Logger,
     port_ids: list[str],
 ) -> None:
-    """Create management first, then optional Lustre, for Packer port input."""
+    """Create the management port for Packer port input."""
     management_port_id = port_manager.create_management_port(
         network_id=network_id,
         security_group_name=security_group_name,
     )
     logger.info("Packer management port: %s", management_port_id)
     port_ids.append(management_port_id)
-    if lustre_network_id:
-        lustre_port_id = port_manager.create_lustre_port(
-            network_id=lustre_network_id,
-        )
-        logger.info("Packer Lustre port: %s", lustre_port_id)
-        port_ids.append(lustre_port_id)
 
 
 def _cleanup_temporary_packer_ports(
@@ -1239,7 +1207,6 @@ def build_image(
     with _temporary_packer_networking(
         floating_ip_pool=floating_ip_pool,
         network_id=network_id,
-        lustre_network_id=lustre_network_id,
         security_group_manager=security_group_manager,
         port_manager=port_manager,
         logger=active_logger,
