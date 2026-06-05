@@ -40,8 +40,10 @@ access_key = "$CEPH_S3_ACCESS_KEY"
 secret_key = "$CEPH_S3_SECRET_KEY"
 
 [ssh_keys]
+# ssh_keys.public_keys should contain the contents of your normal public key file,
+# for example ~/.ssh/id_ed25519.pub.
 public_keys = [
-  "ssh-rsa AAAA... user@host1",
+  "ssh-ed25519 AAAA... user@host1",
   "ssh-rsa BBBB... user@host2",
 ]
 

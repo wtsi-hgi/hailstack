@@ -30,6 +30,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONTRIBUTING_PATH = REPOSITORY_ROOT / "CONTRIBUTING.md"
 AI_PATH = REPOSITORY_ROOT / "AI.md"
 README_PATH = REPOSITORY_ROOT / "README.md"
+EXAMPLE_CONFIG_PATH = REPOSITORY_ROOT / "example-config.toml"
 ERRORS_PATH = REPOSITORY_ROOT / "src" / "hailstack" / "errors.py"
 
 CONTRIBUTING_SECTIONS = (
@@ -147,6 +148,17 @@ def test_readme_reboot_section_documents_explicit_ssh_key_usage() -> None:
         "hailstack reboot --config my-cluster.toml --dotenv .env --ssh-key "
         "~/.ssh/my-cluster-key"
     ) in readme_text
+
+
+def test_readme_and_example_config_describe_default_public_key_file() -> None:
+    """Tell users to paste their normal public key into ssh_keys.public_keys."""
+    readme_text = _read(README_PATH)
+    example_config_text = _read(EXAMPLE_CONFIG_PATH)
+
+    assert "ssh_keys.public_keys" in readme_text
+    assert "~/.ssh/id_ed25519.pub" in readme_text
+    assert "ssh_keys.public_keys" in example_config_text
+    assert "~/.ssh/id_ed25519.pub" in example_config_text
 
 
 def test_ai_covers_required_conventions_and_common_tasks() -> None:

@@ -119,7 +119,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    cp example-config.toml my-cluster.toml
    ```
 
-   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If your runner cannot SSH directly to instances on that network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
+   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Put the contents of your normal SSH public key file, for example `~/.ssh/id_ed25519.pub`, in `ssh_keys.public_keys` so you can SSH to created nodes later. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If your runner cannot SSH directly to instances on that network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
 
    If you installed Hailstack via the SIF and do not have the repository checked out, copy `example-config.toml` out of the image first:
 
@@ -269,7 +269,7 @@ is the `cluster.lustre_mount_target` value.
 
 | Field                  | Description                                                                                                                                                     | Type           | Default                                              | Example                                                        |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------- | -------------------------------------------------------------- |
-| `ssh_keys.public_keys` | Public keys written into `authorized_keys` on all nodes. At least one non-empty key is required. The first key is also used for the OpenStack keypair resource. | `list[string]` | empty list, but validation requires at least one key | `["ssh-rsa AAAA... user@host1", "ssh-rsa BBBB... user@host2"]` |
+| `ssh_keys.public_keys` | Public keys written into `authorized_keys` on all nodes. Paste the contents of your normal public key file, such as `~/.ssh/id_ed25519.pub`. At least one non-empty key is required. The first key is also used for the OpenStack keypair resource. | `list[string]` | empty list, but validation requires at least one key | `["ssh-ed25519 AAAA... user@host1", "ssh-rsa BBBB... user@host2"]` |
 
 ### `[security_groups.master]`
 
@@ -489,7 +489,7 @@ The current implementation exposes services through security-group toggles plus 
 - nginx listens on `80` and `443`, proxies `/jupyter/`, `/spark/`, `/sparkhist/`, `/yarn/`, `/mapreduce/`, `/hdfs/`, per-worker `/nmNN/` pages, and `/netdata/` when monitoring is enabled.
 - The basic-auth username is `hailstack`.
 - cloud-init generates a self-signed TLS certificate on the master at `/etc/nginx/ssl/hailstack.crt` with the matching key at `/etc/nginx/ssl/hailstack.key`.
-- All `ssh_keys.public_keys` entries are written to `authorized_keys` on the cluster nodes. The first key is also registered as the OpenStack keypair.
+- All `ssh_keys.public_keys` entries are written to `authorized_keys` on the cluster nodes. Use your usual public key file, for example `~/.ssh/id_ed25519.pub`; the first key is also registered as the OpenStack keypair.
 - Public ingress is controlled by the `security_groups.master.*` and `security_groups.worker.*` booleans. Worker nodes default to internal-only access apart from the Spark worker and HDFS data-node ports.
 
 ## Monitoring

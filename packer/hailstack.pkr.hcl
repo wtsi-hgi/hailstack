@@ -67,6 +67,7 @@ source "openstack" "hailstack" {
   flavor           = var.flavor
   ssh_username     = var.ssh_username
   ssh_timeout      = "30m"
+  config_drive     = true
   networks         = [var.network]
   floating_ip_pool = var.floating_ip_pool
 }

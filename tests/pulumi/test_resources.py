@@ -328,6 +328,18 @@ def test_num_workers_creates_master_keypair_ports_and_instances(
     }
 
 
+def test_cluster_instances_enable_config_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliver cluster user-data through Nova config drive on every node."""
+    mocks, _, _ = _run_stack(_config(), monkeypatch)
+
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+
+    assert len(instances) == 4
+    assert all(instance["config_drive"] is True for instance in instances)
+
+
 def test_master_ssh_toggle_creates_tcp_22_rule(monkeypatch: pytest.MonkeyPatch) -> None:
     """Create a master ingress rule for SSH when enabled."""
     mocks, _, _ = _run_stack(_config(), monkeypatch)

@@ -319,6 +319,19 @@ def _repo_template_script_entries() -> set[str]:
     return set(re.findall(r'"([^"]+)"', scripts_block.group("body")))
 
 
+def test_checked_in_openstack_builder_uses_config_drive() -> None:
+    """Deliver Packer's temporary SSH key through Nova config drive metadata."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    source_block = re.search(
+        r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
+        template,
+        re.S,
+    )
+    assert source_block is not None
+
+    assert re.search(r"^\s*config_drive\s*=\s*true\s*$", source_block["body"], re.M)
+
+
 def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -> None:
     """Pass the documented base, SSH, network, and bundle vars to Packer."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
