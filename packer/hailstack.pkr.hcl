@@ -111,8 +111,8 @@ build {
       "${path.root}/scripts/ubuntu/hadoop.sh",
       "${path.root}/scripts/ubuntu/spark.sh",
       "${path.root}/scripts/ubuntu/hail.sh",
-      "${path.root}/scripts/ubuntu/jupyter.sh",
       "${path.root}/scripts/ubuntu/gnomad.sh",
+      "${path.root}/scripts/ubuntu/jupyter.sh",
       "${path.root}/scripts/ubuntu/uv.sh",
       "${path.root}/scripts/ubuntu/netdata.sh",
     ]

@@ -2305,6 +2305,15 @@ def test_e2_all_required_provisioner_scripts_exist_and_are_executable() -> None:
         assert script_path.stat().st_mode & 0o111
 
 
+def test_e2_jupyter_provisioner_repairs_base_venv_after_gnomad() -> None:
+    """Run Jupyter dependency repair after gnomAD has installed its dependencies."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    gnomad_reference = '"${path.root}/scripts/ubuntu/gnomad.sh"'
+    jupyter_reference = '"${path.root}/scripts/ubuntu/jupyter.sh"'
+
+    assert template.index(gnomad_reference) < template.index(jupyter_reference)
+
+
 def test_e2_base_venv_preinstalls_are_declared_via_uv() -> None:
     """Declare the base venv and its preinstalled Python tools directly in scripts."""
     expected_tokens = {
@@ -2331,8 +2340,20 @@ def test_e2_base_venv_preinstalls_are_declared_via_uv() -> None:
         ],
         PACKER_SCRIPTS_PATH / "ubuntu/jupyter.sh": [
             "test -d /opt/hailstack/base-venv",
+            'JUPYTER_VERSION="${JUPYTER_VERSION:-3.5.3}"',
+            'JUPYTER_SERVER_VERSION="${JUPYTER_SERVER_VERSION:-2.10.0}"',
+            'JUPYTERLAB_SERVER_VERSION="${JUPYTERLAB_SERVER_VERSION:-2.16.6}"',
+            'JUPYTER_EVENTS_VERSION="${JUPYTER_EVENTS_VERSION:-0.6.3}"',
+            'JSONSCHEMA_VERSION="${JSONSCHEMA_VERSION:-3.2.0}"',
             "/opt/hailstack/base-venv/bin/uv pip install",
-            "jupyterlab",
+            '"jupyterlab==${JUPYTER_VERSION}"',
+            '"jupyter-server==${JUPYTER_SERVER_VERSION}"',
+            '"jupyterlab-server==${JUPYTERLAB_SERVER_VERSION}"',
+            '"jupyter-events==${JUPYTER_EVENTS_VERSION}"',
+            '"jsonschema==${JSONSCHEMA_VERSION}"',
+            "/opt/hailstack/base-venv/bin/python -m pip check",
+            "jupyterlab.labapp",
+            "jupyter_server.serverapp",
         ],
         PACKER_SCRIPTS_PATH / "ubuntu/gnomad.sh": [
             "test -d /opt/hailstack/base-venv",

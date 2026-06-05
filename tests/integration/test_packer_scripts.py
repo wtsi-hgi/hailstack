@@ -34,6 +34,7 @@ BASE_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "base.sh"
 HADOOP_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "hadoop.sh"
 PACKAGES_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "packages.sh"
 GNOMAD_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "gnomad.sh"
+JUPYTER_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "jupyter.sh"
 UBUNTU_SCRIPTS_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu"
 VERSION_CHECK_PATTERN = re.compile(
     r'(grep -F "\$\{?[A-Z0-9_]+_VERSION\}?"|'
@@ -168,6 +169,22 @@ def _rewrite_gnomad_script(path: Path, temp_root: Path) -> Path:
     )
 
     rewritten_path = temp_root / "gnomad.sh"
+    rewritten_path.write_text(rewritten, encoding="utf-8")
+    rewritten_path.chmod(0o755)
+    return rewritten_path
+
+
+def _rewrite_jupyter_script(path: Path, temp_root: Path) -> Path:
+    """Copy jupyter.sh into a temporary tree and rewrite absolute system paths."""
+    rewritten = path.read_text(encoding="utf-8")
+    replacements = {
+        "/opt/hailstack": str(temp_root / "opt" / "hailstack"),
+        "/etc/systemd/system": str(temp_root / "etc" / "systemd" / "system"),
+    }
+    for original, replacement in replacements.items():
+        rewritten = rewritten.replace(original, replacement)
+
+    rewritten_path = temp_root / "jupyter.sh"
     rewritten_path.write_text(rewritten, encoding="utf-8")
     rewritten_path.chmod(0o755)
     return rewritten_path
@@ -577,6 +594,159 @@ def test_o2_packages_script_installs_python_native_build_dependencies(
     assert any("build-essential" in line for line in install_commands)
     assert any("libpq-dev" in line for line in install_commands)
     assert any("python3.12-dev" in line for line in install_commands)
+
+
+def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
+    tmp_path: Path,
+) -> None:
+    """Replace the bad Jupyter/jsonschema set before validating server imports."""
+    temp_root = tmp_path / "root"
+    base_venv = temp_root / "opt" / "hailstack" / "base-venv"
+    bin_dir = base_venv / "bin"
+    command_log = tmp_path / "commands.log"
+    jsonschema_state = tmp_path / "jsonschema-version.txt"
+    jupyterlab_state = tmp_path / "jupyterlab-version.txt"
+    jupyter_server_state = tmp_path / "jupyter-server-version.txt"
+    jupyterlab_server_state = tmp_path / "jupyterlab-server-version.txt"
+    jupyter_events_state = tmp_path / "jupyter-events-version.txt"
+    service_dir = temp_root / "etc" / "systemd" / "system"
+    bin_dir.mkdir(parents=True)
+    service_dir.mkdir(parents=True)
+    jsonschema_state.write_text("3.2.0", encoding="utf-8")
+    jupyterlab_state.write_text("4.5.8", encoding="utf-8")
+    jupyter_server_state.write_text("2.17.0", encoding="utf-8")
+    jupyterlab_server_state.write_text("2.28.0", encoding="utf-8")
+    jupyter_events_state.write_text("0.12.1", encoding="utf-8")
+    (service_dir / "jupyter-lab.service").write_text(
+        "[Unit]\nDescription=JupyterLab\n",
+        encoding="utf-8",
+    )
+
+    _write_stub_command(
+        bin_dir / "uv",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "uv %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        '[[ "${1:-}" == "pip" && "${2:-}" == "install" ]]\n'
+        "saw_jupyter=0\n"
+        "saw_core_server=0\n"
+        "saw_server=0\n"
+        "saw_events=0\n"
+        "saw_jsonschema=0\n"
+        "saw_upgrade=0\n"
+        'for arg in "$@"; do\n'
+        '  [[ "$arg" == "--upgrade" ]] && saw_upgrade=1\n'
+        '  [[ "$arg" == "jupyterlab==3.5.3" ]] && saw_jupyter=1\n'
+        '  [[ "$arg" == "jupyter-server==2.10.0" ]] && saw_core_server=1\n'
+        '  [[ "$arg" == "jupyterlab-server==2.16.6" ]] && saw_server=1\n'
+        '  [[ "$arg" == "jupyter-events==0.6.3" ]] && saw_events=1\n'
+        '  [[ "$arg" == "jsonschema==3.2.0" ]] && saw_jsonschema=1\n'
+        "done\n"
+        'if [[ "$saw_upgrade" == "1" && "$saw_jupyter" == "1" '
+        '&& "$saw_core_server" == "1" && "$saw_server" == "1" '
+        '&& "$saw_events" == "1" '
+        '&& "$saw_jsonschema" == "1" ]]; then\n'
+        '  printf "3.5.3" >"${HAILSTACK_JUPYTERLAB_STATE}"\n'
+        '  printf "2.10.0" >"${HAILSTACK_JUPYTER_SERVER_STATE}"\n'
+        '  printf "2.16.6" >"${HAILSTACK_JUPYTERLAB_SERVER_STATE}"\n'
+        '  printf "0.6.3" >"${HAILSTACK_JUPYTER_EVENTS_STATE}"\n'
+        '  printf "3.2.0" >"${HAILSTACK_JSONSCHEMA_STATE}"\n'
+        "fi\n",
+    )
+    _write_stub_command(
+        bin_dir / "python",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "python %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'jsonschema_version="$(cat "${HAILSTACK_JSONSCHEMA_STATE}")"\n'
+        'server_version="$(cat "${HAILSTACK_JUPYTERLAB_SERVER_STATE}")"\n'
+        'events_version="$(cat "${HAILSTACK_JUPYTER_EVENTS_STATE}")"\n'
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then\n'
+        '  [[ "${3:-}" == "check" ]]\n'
+        '  if [[ "$server_version" == "2.28.0" ]]; then\n'
+        '    printf "jupyterlab-server 2.28.0 requires jsonschema>=4.18.0\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        '  if [[ "$events_version" == "0.12.1" ]]; then\n'
+        '    printf "jupyter-events 0.12.1 requires jsonschema>=4.18.0\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        '  [[ "$jsonschema_version" == "3.2.0" ]]\n'
+        '  printf "No broken requirements found.\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "${1:-}" == "-c" ]]; then\n'
+        '  [[ "$*" == *"jupyterlab.labapp"* ]]\n'
+        '  [[ "$*" == *"jupyter_server.serverapp"* ]]\n'
+        '  [[ "$*" == *"jupyterlab-server"* ]]\n'
+        '  if [[ "$server_version" == "2.28.0" ]]; then\n'
+        '    printf "TypeError: unexpected keyword argument registry\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "jupyter",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "jupyter %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'if [[ "${1:-}" == "lab" && "${2:-}" == "--version" ]]; then\n'
+        '  cat "${HAILSTACK_JUPYTERLAB_STATE}"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "systemctl",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+
+    script_path = _rewrite_jupyter_script(JUPYTER_SCRIPT_PATH, temp_root)
+    env = dict(os.environ)
+    env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+    env["HAILSTACK_JSONSCHEMA_STATE"] = str(jsonschema_state)
+    env["HAILSTACK_JUPYTERLAB_STATE"] = str(jupyterlab_state)
+    env["HAILSTACK_JUPYTER_SERVER_STATE"] = str(jupyter_server_state)
+    env["HAILSTACK_JUPYTERLAB_SERVER_STATE"] = str(jupyterlab_server_state)
+    env["HAILSTACK_JUPYTER_EVENTS_STATE"] = str(jupyter_events_state)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert jupyterlab_state.read_text(encoding="utf-8") == "3.5.3"
+    assert jupyter_server_state.read_text(encoding="utf-8") == "2.10.0"
+    assert jupyterlab_server_state.read_text(encoding="utf-8") == "2.16.6"
+    assert jupyter_events_state.read_text(encoding="utf-8") == "0.6.3"
+    assert jsonschema_state.read_text(encoding="utf-8") == "3.2.0"
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+
+    assert any(
+        line.startswith("uv pip install")
+        and "--upgrade" in line
+        and "jupyterlab==3.5.3" in line
+        and "jupyter-server==2.10.0" in line
+        and "jupyterlab-server==2.16.6" in line
+        and "jupyter-events==0.6.3" in line
+        and "jsonschema==3.2.0" in line
+        for line in commands
+    )
+    assert any(line == "python -m pip check" for line in commands)
+    assert any(
+        line.startswith("python -c")
+        and "jupyterlab.labapp" in line
+        and "jupyter_server.serverapp" in line
+        for line in commands
+    )
 
 
 def test_o2_gnomad_script_keeps_data_release_separate_from_package_pin(
