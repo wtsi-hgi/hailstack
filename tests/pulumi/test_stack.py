@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from pulumi import automation as auto
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import PulumiError, S3Error
@@ -85,6 +86,30 @@ def _config(*, endpoint: str = "https://ceph.example.invalid") -> ClusterConfig:
             volumes=SimpleNamespace(preserve_on_destroy=False),
         ),
     )
+
+
+def _capture_new_stack_preview_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    """Return the Pulumi env passed to a first-time stack preview."""
+    fake_stack = FakeAutoStack()
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_create_stack(**kwargs: object) -> FakeAutoStack:
+        workspace_options = cast(auto.LocalWorkspaceOptions, kwargs["opts"])
+        captured_envs.append(cast(dict[str, str], workspace_options.env_vars))
+        return fake_stack
+
+    monkeypatch.setattr(stack_module.auto, "create_stack", fake_create_stack)
+
+    stack_module.AutomationStackRunner().preview(
+        _config(),
+        cast(Bundle, SimpleNamespace(id="bundle-id")),
+        stack_exists=False,
+    )
+
+    assert len(captured_envs) == 1
+    return captured_envs[0]
 
 
 def test_preview_destroy_selects_existing_stack(
@@ -160,6 +185,44 @@ def test_preview_new_stack_allows_missing_runtime_secrets(
     assert len(captured_program) == 1
     captured_program[0]()
     assert recorded_allow_missing_runtime_secrets == [True]
+
+
+def test_preview_new_stack_defaults_passphrase_for_ephemeral_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview first-time creates non-interactively with the local backend."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"]
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_preview_new_stack_preserves_explicit_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrases for first-time previews."""
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE", "caller-passphrase")
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == "caller-passphrase"
+
+
+def test_preview_new_stack_preserves_explicit_passphrase_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrase files for first-time previews."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE_FILE", "/tmp/caller-passphrase")
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE_FILE"] == "/tmp/caller-passphrase"
+    assert "PULUMI_CONFIG_PASSPHRASE" not in env
 
 
 def test_destroy_raises_clear_error_when_stack_is_missing(
@@ -377,6 +440,20 @@ def test_pulumi_env_preserves_explicit_pulumi_home(
     env = runner._pulumi_env(_config())
 
     assert env["PULUMI_HOME"] == "/tmp/custom-pulumi-home"
+
+
+def test_pulumi_env_does_not_default_passphrase_for_persisted_stacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep passphrase defaults scoped away from persisted stack operations."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert "PULUMI_CONFIG_PASSPHRASE" not in env
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
 
 
 def test_backend_access_normalizes_bare_ceph_endpoint_and_defaults_region(

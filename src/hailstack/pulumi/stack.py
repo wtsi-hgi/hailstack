@@ -41,6 +41,7 @@ from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
 
 REPOSITORY_ROOT = RUNTIME_WORK_DIR
 S3_CHECKSUM_MISMATCH_ERROR = "XAmzContentSHA256Mismatch"
+_EPHEMERAL_PREVIEW_PASSPHRASE = "hailstack-ephemeral-preview"
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,7 @@ class AutomationStackRunner:
         with tempfile.TemporaryDirectory(prefix="hailstack-preview-") as temp_dir:
             stack_name = f"preview-{config.cluster.name}"
             workspace_options = auto.LocalWorkspaceOptions(
-                env_vars=self._pulumi_env(config),
+                env_vars=self._ephemeral_preview_env(config),
                 project_settings=auto.ProjectSettings(
                     name="hailstack",
                     runtime="python",
@@ -326,6 +327,16 @@ class AutomationStackRunner:
         env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
         _set_default_s3_region(env)
         env.setdefault("PULUMI_HOME", str(self._pulumi_home()))
+        return env
+
+    def _ephemeral_preview_env(self, config: ClusterConfig) -> dict[str, str]:
+        """Build Pulumi env for non-persisted first-time stack previews."""
+        env = self._pulumi_env(config)
+        if (
+            "PULUMI_CONFIG_PASSPHRASE" not in env
+            and "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+        ):
+            env["PULUMI_CONFIG_PASSPHRASE"] = _EPHEMERAL_PREVIEW_PASSPHRASE
         return env
 
     def _pulumi_home(self) -> Path:
