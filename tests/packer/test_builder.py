@@ -113,6 +113,15 @@ def _write_template_assets(tmp_path: Path) -> Path:
     return template_path
 
 
+def _repo_template_script_entries() -> set[str]:
+    """Return shell provisioner script entries from the checked-in template."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    scripts_block = re.search(r"scripts\s*=\s*\[(?P<body>.*?)\]", template, re.S)
+    assert scripts_block is not None
+
+    return set(re.findall(r'"([^"]+)"', scripts_block.group("body")))
+
+
 def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -> None:
     """Pass the documented base, SSH, network, and bundle vars to Packer."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -527,7 +536,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
 
     for script_path in REQUIRED_PACKER_SCRIPT_PATHS:
         relative_path = script_path.relative_to(PACKER_SCRIPTS_PATH.parent)
-        assert f'"{relative_path.as_posix()}"' in template
+        assert f'"${{path.root}}/{relative_path.as_posix()}"' in template
 
     for env_name in (
         "HADOOP_VERSION",
@@ -539,6 +548,18 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "GNOMAD_VERSION",
     ):
         assert f'"{env_name}=${{var.' in template
+
+
+def test_repo_packer_template_roots_scripts_at_template_directory() -> None:
+    """Resolve shell provisioner scripts from the template root, not process cwd."""
+    expected_entries = {
+        f"${{path.root}}/{script_path.relative_to(PACKER_SCRIPTS_PATH.parent).as_posix()}"
+        for script_path in REQUIRED_PACKER_SCRIPT_PATHS
+    }
+    actual_entries = _repo_template_script_entries()
+
+    assert actual_entries == expected_entries
+    assert not any(entry.startswith("scripts/") for entry in actual_entries)
 
 
 def test_repo_packer_scripts_are_executable_and_embed_version_checks() -> None:

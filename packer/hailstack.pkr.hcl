@@ -76,15 +76,15 @@ build {
 
   provisioner "shell" {
     scripts = [
-      "scripts/base.sh",
-      "scripts/ubuntu/packages.sh",
-      "scripts/ubuntu/hadoop.sh",
-      "scripts/ubuntu/spark.sh",
-      "scripts/ubuntu/hail.sh",
-      "scripts/ubuntu/jupyter.sh",
-      "scripts/ubuntu/gnomad.sh",
-      "scripts/ubuntu/uv.sh",
-      "scripts/ubuntu/netdata.sh",
+      "${path.root}/scripts/base.sh",
+      "${path.root}/scripts/ubuntu/packages.sh",
+      "${path.root}/scripts/ubuntu/hadoop.sh",
+      "${path.root}/scripts/ubuntu/spark.sh",
+      "${path.root}/scripts/ubuntu/hail.sh",
+      "${path.root}/scripts/ubuntu/jupyter.sh",
+      "${path.root}/scripts/ubuntu/gnomad.sh",
+      "${path.root}/scripts/ubuntu/uv.sh",
+      "${path.root}/scripts/ubuntu/netdata.sh",
     ]
     environment_vars = [
       "HADOOP_VERSION=${var.hadoop_version}",
