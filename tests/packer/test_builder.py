@@ -625,8 +625,8 @@ def _repo_shell_provisioner_block() -> str:
     return provisioner_block["body"]
 
 
-def test_checked_in_openstack_builder_uses_config_drive() -> None:
-    """Deliver Packer's temporary SSH key through Nova config drive metadata."""
+def _repo_openstack_source_block() -> str:
+    """Return the checked-in OpenStack source body."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
     source_block = re.search(
         r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
@@ -635,18 +635,31 @@ def test_checked_in_openstack_builder_uses_config_drive() -> None:
     )
     assert source_block is not None
 
-    assert re.search(r"^\s*config_drive\s*=\s*true\s*$", source_block["body"], re.M)
+    return source_block["body"]
+
+
+def test_checked_in_openstack_builder_uses_config_drive() -> None:
+    """Deliver Packer's temporary SSH key through Nova config drive metadata."""
+    source_body = _repo_openstack_source_block()
+
+    assert re.search(r"^\s*config_drive\s*=\s*true\s*$", source_body, re.M)
+
+
+def test_checked_in_openstack_builder_targets_floating_ip_management_net() -> None:
+    """Associate Packer floating IPs with the management/cloudforms network."""
+    source_body = _repo_openstack_source_block()
+
+    assert re.search(
+        r"^\s*instance_floating_ip_net\s*=\s*var\.network\s*$",
+        source_body,
+        re.M,
+    )
 
 
 def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> None:
     """Attach the optional Lustre network without losing the management network."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
-    source_block = re.search(
-        r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
-        template,
-        re.S,
-    )
-    assert source_block is not None
+    source_body = _repo_openstack_source_block()
 
     assert 'variable "lustre_network"' in template
     assert 'var.lustre_network == ""' in template
@@ -661,7 +674,7 @@ def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> No
     assert expected_networks_local in template
     assert re.search(
         r"^\s*networks\s*=\s*local\.packer_networks\s*$",
-        source_block["body"],
+        source_body,
         re.M,
     )
 
@@ -669,24 +682,19 @@ def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> No
 def test_checked_in_openstack_builder_uses_ports_without_serverwide_sg() -> None:
     """Switch to explicit ports without server-wide security groups."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
-    source_block = re.search(
-        r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
-        template,
-        re.S,
-    )
-    assert source_block is not None
+    source_body = _repo_openstack_source_block()
 
     assert 'variable "ports"' in template
     assert 'var.ports == "" ? null : split(",", var.ports)' in template
     assert 'var.ports == "" ? ["default"] : null' in template
     assert re.search(
         r"^\s*ports\s*=\s*local\.packer_ports\s*$",
-        source_block["body"],
+        source_body,
         re.M,
     )
     assert re.search(
         r"^\s*security_groups\s*=\s*local\.packer_security_groups\s*$",
-        source_block["body"],
+        source_body,
         re.M,
     )
 

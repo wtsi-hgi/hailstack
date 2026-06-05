@@ -87,6 +87,7 @@ source "openstack" "hailstack" {
   networks         = local.packer_networks
   ports            = local.packer_ports
   floating_ip_pool = var.floating_ip_pool
+  instance_floating_ip_net = var.network
   security_groups  = local.packer_security_groups
 }
 
