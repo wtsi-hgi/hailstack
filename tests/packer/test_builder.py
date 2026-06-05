@@ -23,6 +23,7 @@
 
 """Acceptance tests for packer image building."""
 
+import logging
 import os
 import re
 import shutil
@@ -30,9 +31,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+import hailstack.packer.builder as packer_builder
 from hailstack.config.compatibility import Bundle
 from hailstack.config.parser import load_config
 from hailstack.errors import PackerError
@@ -58,7 +61,7 @@ def _write_config(
     network_name: str = NETWORK_UUID,
     lustre_network: str = "",
     cluster_floating_ip_pool: str = "",
-    packer_floating_ip_pool: str = "public",
+    packer_floating_ip_pool: str = "",
 ) -> Path:
     """Write a minimal build-image config file."""
     lustre_network_line = (
@@ -125,6 +128,23 @@ def _result(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+class _RecordingSecurityGroupManager:
+    """Record temporary security-group lifecycle calls for builder tests."""
+
+    def __init__(self, name: str = "hailstack-packer-ssh-test") -> None:
+        self.name = name
+        self.events: list[str] = []
+
+    def create(self) -> str:
+        """Create a fake temporary security group."""
+        self.events.append("create")
+        return self.name
+
+    def cleanup(self, security_group_name: str) -> None:
+        """Delete a fake temporary security group."""
+        self.events.append(f"cleanup:{security_group_name}")
 
 
 def test_default_packer_runner_stops_on_ssh_no_route_debug_log(
@@ -553,6 +573,26 @@ def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> No
     )
 
 
+def test_checked_in_openstack_builder_attaches_temporary_ssh_security_group() -> None:
+    """Attach default plus temporary SSH-open security group when configured."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    source_block = re.search(
+        r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
+        template,
+        re.S,
+    )
+    assert source_block is not None
+
+    assert 'variable "ssh_security_group"' in template
+    assert 'var.ssh_security_group == ""' in template
+    assert '["default", var.ssh_security_group]' in template
+    assert re.search(
+        r"^\s*security_groups\s*=\s*local\.packer_security_groups\s*$",
+        source_block["body"],
+        re.M,
+    )
+
+
 def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -> None:
     """Pass the documented base, SSH, network, and bundle vars to Packer."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -581,7 +621,8 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert "flavor=m2.large" in command
     assert f"network={NETWORK_UUID}" in command
     assert "lustre_network=" in command
-    assert "floating_ip_pool=public" in command
+    assert "floating_ip_pool=" in command
+    assert "ssh_security_group=" in command
     assert not any(argument.startswith("image_name=") for argument in command)
 
 
@@ -597,6 +638,7 @@ def test_build_image_reuses_cluster_floating_ip_pool_for_packer_when_unset(
         )
     )
     template_path = _write_template_assets(tmp_path)
+    security_groups = _RecordingSecurityGroupManager()
     recorded_commands: list[list[str]] = []
 
     def fake_runner(
@@ -612,9 +654,15 @@ def test_build_image_reuses_cluster_floating_ip_pool_for_packer_when_unset(
         _bundle(),
         runner=fake_runner,
         template_path=template_path,
+        security_group_manager=security_groups,
     )
 
     assert "floating_ip_pool=public" in recorded_commands[0]
+    assert "ssh_security_group=hailstack-packer-ssh-test" in recorded_commands[0]
+    assert security_groups.events == [
+        "create",
+        "cleanup:hailstack-packer-ssh-test",
+    ]
 
 
 def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
@@ -629,6 +677,7 @@ def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
         )
     )
     template_path = _write_template_assets(tmp_path)
+    security_groups = _RecordingSecurityGroupManager()
     recorded_commands: list[list[str]] = []
 
     def fake_runner(
@@ -644,11 +693,328 @@ def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
         _bundle(),
         runner=fake_runner,
         template_path=template_path,
+        security_group_manager=security_groups,
     )
 
     command = recorded_commands[0]
     assert "floating_ip_pool=build-public" in command
     assert "floating_ip_pool=cluster-public" not in command
+    assert "ssh_security_group=hailstack-packer-ssh-test" in command
+
+
+def test_build_image_creates_temporary_ssh_security_group_for_floating_ip_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open TCP/22 on a temporary build security group for floating IP SSH."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            cluster_floating_ip_pool="public",
+            packer_floating_ip_pool="",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+    openstack_commands: list[list[str]] = []
+    events: list[str] = []
+    security_group_name = "hailstack-packer-ssh-aaaaaaaa"
+
+    monkeypatch.setattr(
+        packer_builder,
+        "uuid4",
+        lambda: UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+    )
+
+    def fake_openstack(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output
+        assert text
+        assert not check
+        openstack_commands.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='{"id": "sg-id"}\n',
+            stderr="",
+        )
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        events.append("runner")
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_openstack)
+
+    build_image(config, _bundle(), runner=fake_runner, template_path=template_path)
+
+    assert events == ["runner"]
+    assert openstack_commands == [
+        [
+            "openstack",
+            "security",
+            "group",
+            "create",
+            "--description",
+            "Temporary Hailstack Packer SSH access for image build",
+            security_group_name,
+            "-f",
+            "json",
+        ],
+        [
+            "openstack",
+            "security",
+            "group",
+            "rule",
+            "create",
+            "--ingress",
+            "--ethertype",
+            "IPv4",
+            "--protocol",
+            "tcp",
+            "--dst-port",
+            "22",
+            "--remote-ip",
+            "0.0.0.0/0",
+            security_group_name,
+            "-f",
+            "json",
+        ],
+        [
+            "openstack",
+            "security",
+            "group",
+            "delete",
+            security_group_name,
+        ],
+    ]
+    command = recorded_commands[0]
+    assert "floating_ip_pool=public" in command
+    assert f"ssh_security_group={security_group_name}" in command
+    assert not any("cloudforms_ssh_in" in argument for argument in command)
+
+
+def test_build_image_skips_temporary_ssh_security_group_without_floating_ip_pool(
+    tmp_path: Path,
+) -> None:
+    """Keep non-floating-IP builds on the existing security-group path."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            cluster_floating_ip_pool="",
+            packer_floating_ip_pool="",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    security_groups = _RecordingSecurityGroupManager()
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        security_group_manager=security_groups,
+    )
+
+    assert security_groups.events == []
+    assert "floating_ip_pool=" in recorded_commands[0]
+    assert "ssh_security_group=" in recorded_commands[0]
+
+
+def test_build_image_cleans_up_temporary_ssh_security_group_when_packer_fails(
+    tmp_path: Path,
+) -> None:
+    """Delete temporary SSH ingress even when Packer returns a failure."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", packer_floating_ip_pool="public")
+    )
+    template_path = _write_template_assets(tmp_path)
+    security_groups = _RecordingSecurityGroupManager()
+    events: list[str] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        events.append("runner")
+        return _result("", stderr="template failed", returncode=1)
+
+    with pytest.raises(PackerError, match="template failed"):
+        build_image(
+            config,
+            _bundle(),
+            runner=fake_runner,
+            template_path=template_path,
+            security_group_manager=security_groups,
+        )
+
+    assert events == ["runner"]
+    assert security_groups.events == [
+        "create",
+        "cleanup:hailstack-packer-ssh-test",
+    ]
+
+
+def test_build_image_logs_warning_when_temporary_ssh_security_group_cleanup_fails(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep the primary Packer result visible when SG cleanup fails."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", packer_floating_ip_pool="public")
+    )
+    template_path = _write_template_assets(tmp_path)
+
+    class FailingCleanupSecurityGroupManager(_RecordingSecurityGroupManager):
+        """Raise during cleanup to exercise warning-only handling."""
+
+        def cleanup(self, security_group_name: str) -> None:
+            """Fail to delete the fake temporary security group."""
+            super().cleanup(security_group_name)
+            raise PackerError("delete failed")
+
+    security_groups = FailingCleanupSecurityGroupManager()
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        return _result("artifact,0,id,image-123\n")
+
+    with caplog.at_level(logging.WARNING):
+        result = build_image(
+            config,
+            _bundle(),
+            runner=fake_runner,
+            template_path=template_path,
+            security_group_manager=security_groups,
+        )
+
+    assert result == "image-123"
+    assert security_groups.events == [
+        "create",
+        "cleanup:hailstack-packer-ssh-test",
+    ]
+    assert "Could not delete temporary Packer SSH security group" in caplog.text
+    assert "hailstack-packer-ssh-test" in caplog.text
+    assert "delete failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failing_command", "expected_context"),
+    [
+        pytest.param("create", "create temporary Packer SSH security group", id="sg"),
+        pytest.param("rule", "create temporary Packer SSH ingress rule", id="rule"),
+    ],
+)
+def test_build_image_fails_before_runner_when_temporary_ssh_security_group_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_command: str,
+    expected_context: str,
+) -> None:
+    """Fail before Packer when OpenStack cannot create SSH ingress."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", packer_floating_ip_pool="public")
+    )
+    template_path = _write_template_assets(tmp_path)
+    runner_called = False
+    openstack_commands: list[list[str]] = []
+
+    def fake_openstack(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, check
+        openstack_commands.append(command)
+        is_group_create_command = command[:4] == [
+            "openstack",
+            "security",
+            "group",
+            "create",
+        ]
+        is_rule_command = command[:5] == [
+            "openstack",
+            "security",
+            "group",
+            "rule",
+            "create",
+        ]
+        if failing_command == "create" and is_group_create_command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr="Quota exceeded",
+            )
+        if failing_command == "rule" and is_rule_command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr="Forbidden",
+            )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("runner should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fake_openstack)
+
+    with pytest.raises(PackerError) as raised:
+        build_image(config, _bundle(), runner=fail_runner, template_path=template_path)
+
+    message = str(raised.value)
+    assert expected_context in message
+    assert "security group quota/permissions" in message
+    assert ("Quota exceeded" in message) or ("Forbidden" in message)
+    assert not runner_called
+    if failing_command == "rule":
+        assert openstack_commands[-1][:4] == [
+            "openstack",
+            "security",
+            "group",
+            "delete",
+        ]
 
 
 def test_build_image_runs_packer_from_template_directory(
@@ -1164,6 +1530,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "network",
         "lustre_network",
         "floating_ip_pool",
+        "ssh_security_group",
     ):
         assert f'variable "{variable_name}"' in template
 

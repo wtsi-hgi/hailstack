@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
@@ -76,6 +76,10 @@ REQUIRED_PACKER_SCRIPT_PATHS = tuple(
 _MAX_PACKER_DIAGNOSTIC_LINES = 8
 _PACKER_MONITOR_POLL_SECONDS = 0.05
 _PACKER_INTERRUPT_GRACE_SECONDS = 5.0
+_PACKER_SSH_SECURITY_GROUP_NAME_PREFIX = "hailstack-packer-ssh-"
+_PACKER_SSH_SECURITY_GROUP_DESCRIPTION = (
+    "Temporary Hailstack Packer SSH access for image build"
+)
 _NO_ROUTE_TO_HOST_RE = re.compile(
     r"dial tcp (?P<host>[^:\s]+):(?P<port>\d+): connect: no route to host",
     re.IGNORECASE,
@@ -107,6 +111,18 @@ class NetworkResolver(Protocol):
         ...
 
 
+class BuildSecurityGroupManager(Protocol):
+    """Define how build-image creates temporary SSH security-group access."""
+
+    def create(self) -> str:
+        """Create temporary SSH ingress and return its security-group name."""
+        ...
+
+    def cleanup(self, security_group_name: str) -> None:
+        """Delete temporary SSH ingress by security-group name."""
+        ...
+
+
 @dataclass(frozen=True)
 class _PackerOutputEvent:
     """Represent one line captured from a live Packer output stream."""
@@ -121,6 +137,125 @@ class _OpenStackNetworkShow(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str = Field(validation_alias=AliasChoices("id", "ID"))
+
+
+class _OpenStackBuildSecurityGroupManager:
+    """Manage temporary OpenStack SSH security-group access for Packer."""
+
+    def create(self) -> str:
+        """Create a temporary TCP/22 ingress security group."""
+        name = _temporary_packer_ssh_security_group_name()
+        _run_openstack_security_group_command(
+            [
+                "openstack",
+                "security",
+                "group",
+                "create",
+                "--description",
+                _PACKER_SSH_SECURITY_GROUP_DESCRIPTION,
+                name,
+                "-f",
+                "json",
+            ],
+            action=f"create temporary Packer SSH security group `{name}`",
+        )
+        try:
+            _run_openstack_security_group_command(
+                [
+                    "openstack",
+                    "security",
+                    "group",
+                    "rule",
+                    "create",
+                    "--ingress",
+                    "--ethertype",
+                    "IPv4",
+                    "--protocol",
+                    "tcp",
+                    "--dst-port",
+                    "22",
+                    "--remote-ip",
+                    "0.0.0.0/0",
+                    name,
+                    "-f",
+                    "json",
+                ],
+                action=f"create temporary Packer SSH ingress rule on `{name}`",
+            )
+        except PackerError:
+            _cleanup_security_group_after_creation_failure(self, name)
+            raise
+
+        return name
+
+    def cleanup(self, security_group_name: str) -> None:
+        """Delete a temporary OpenStack security group."""
+        _run_openstack_security_group_command(
+            [
+                "openstack",
+                "security",
+                "group",
+                "delete",
+                security_group_name,
+            ],
+            action=(
+                f"delete temporary Packer SSH security group `{security_group_name}`"
+            ),
+        )
+
+
+def _temporary_packer_ssh_security_group_name() -> str:
+    """Return a short unique security-group name for a Packer build."""
+    return f"{_PACKER_SSH_SECURITY_GROUP_NAME_PREFIX}{uuid4().hex[:8]}"
+
+
+def _run_openstack_security_group_command(
+    command: list[str],
+    *,
+    action: str,
+) -> None:
+    """Run an OpenStack security-group command with user-facing errors."""
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise _security_group_provisioning_error(
+            action,
+            "The `openstack` CLI was not found on PATH.",
+        ) from error
+
+    if result.returncode == 0:
+        return
+
+    detail = _raw_packer_output(result)
+    if detail:
+        detail = f"OpenStack CLI output: {detail}"
+    else:
+        detail = f"OpenStack CLI exited with status {result.returncode}."
+    raise _security_group_provisioning_error(action, detail)
+
+
+def _security_group_provisioning_error(action: str, detail: str) -> PackerError:
+    """Build a clear PackerError for SSH security-group setup failures."""
+    return PackerError(
+        f"Could not {action} before launching Packer. Check OpenStack "
+        f"security group quota/permissions and credentials. {detail}"
+    )
+
+
+def _cleanup_security_group_after_creation_failure(
+    security_group_manager: BuildSecurityGroupManager,
+    security_group_name: str,
+) -> None:
+    """Best-effort delete after creating a group but failing to add ingress."""
+    try:
+        security_group_manager.cleanup(security_group_name)
+    except PackerError:
+        return
 
 
 def _run_packer(
@@ -388,6 +523,7 @@ def _packer_vars(
     *,
     network_id: str,
     lustre_network_id: str,
+    ssh_security_group_name: str = "",
 ) -> dict[str, str]:
     """Build the documented Packer variable mapping for a bundle."""
     packer_config = config.validate_for_command("build-image").packer
@@ -409,6 +545,7 @@ def _packer_vars(
         "network": network_id,
         "lustre_network": lustre_network_id,
         "floating_ip_pool": floating_ip_pool,
+        "ssh_security_group": ssh_security_group_name,
     }
 
 
@@ -763,6 +900,36 @@ def _normalized_relative_packer_log_path() -> Iterator[None]:
         os.environ["PACKER_LOG_PATH"] = log_path
 
 
+@contextmanager
+def _temporary_packer_ssh_security_group(
+    *,
+    floating_ip_pool: str,
+    security_group_manager: BuildSecurityGroupManager,
+    logger: logging.Logger,
+) -> Iterator[str]:
+    """Create temporary SSH ingress only for floating-IP Packer builds."""
+    if not floating_ip_pool:
+        yield ""
+        return
+
+    security_group_name = security_group_manager.create()
+    logger.info("Packer SSH security group: %s", security_group_name)
+    try:
+        yield security_group_name
+    finally:
+        try:
+            security_group_manager.cleanup(security_group_name)
+        except Exception as error:
+            logger.warning(
+                "Could not delete temporary Packer SSH security group %s: %s",
+                security_group_name,
+                error,
+            )
+
+
+_DEFAULT_BUILD_SECURITY_GROUP_MANAGER = _OpenStackBuildSecurityGroupManager()
+
+
 def build_image(
     config: ClusterConfig,
     bundle: Bundle,
@@ -771,6 +938,9 @@ def build_image(
     template_path: Path = PACKER_TEMPLATE_PATH,
     logger: logging.Logger | None = None,
     network_resolver: NetworkResolver = _resolve_openstack_network_id,
+    security_group_manager: BuildSecurityGroupManager = (
+        _DEFAULT_BUILD_SECURITY_GROUP_MANAGER
+    ),
 ) -> str:
     """Run packer build using config.packer settings and return the image ID."""
     active_logger = logger or logging.getLogger(__name__)
@@ -785,21 +955,30 @@ def build_image(
         network_resolver,
     )
     _log_packer_networking(active_logger, config, network_id, lustre_network_id)
-    active_logger.info("Packer starting")
+    packer_config = config.validate_for_command("build-image").packer
+    assert packer_config is not None
+    floating_ip_pool, _ = _packer_floating_ip_pool(config, packer_config)
 
-    with _normalized_relative_packer_log_path():
-        result = runner(
-            _packer_command(
-                resolved_template_path,
-                _packer_vars(
-                    config,
-                    bundle,
-                    network_id=network_id,
-                    lustre_network_id=lustre_network_id,
+    with _temporary_packer_ssh_security_group(
+        floating_ip_pool=floating_ip_pool,
+        security_group_manager=security_group_manager,
+        logger=active_logger,
+    ) as ssh_security_group_name:
+        active_logger.info("Packer starting")
+        with _normalized_relative_packer_log_path():
+            result = runner(
+                _packer_command(
+                    resolved_template_path,
+                    _packer_vars(
+                        config,
+                        bundle,
+                        network_id=network_id,
+                        lustre_network_id=lustre_network_id,
+                        ssh_security_group_name=ssh_security_group_name,
+                    ),
                 ),
-            ),
-            cwd=resolved_template_path.parent,
-        )
+                cwd=resolved_template_path.parent,
+            )
     if result.returncode != 0:
         raise PackerError(
             _packer_failure_detail(

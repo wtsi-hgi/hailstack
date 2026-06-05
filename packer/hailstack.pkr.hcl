@@ -66,8 +66,14 @@ variable "floating_ip_pool" {
   default = ""
 }
 
+variable "ssh_security_group" {
+  type    = string
+  default = ""
+}
+
 locals {
-  packer_networks = var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]
+  packer_networks         = var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]
+  packer_security_groups = var.ssh_security_group == "" ? ["default"] : ["default", var.ssh_security_group]
 }
 
 source "openstack" "hailstack" {
@@ -79,6 +85,7 @@ source "openstack" "hailstack" {
   config_drive     = true
   networks         = local.packer_networks
   floating_ip_pool = var.floating_ip_pool
+  security_groups  = local.packer_security_groups
 }
 
 build {
