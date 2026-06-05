@@ -37,7 +37,7 @@ import yaml
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import ConfigError
 
-HADOOP_CONF_DIR = "/etc/hadoop/conf"
+HADOOP_CONF_DIR = "/opt/hadoop/etc/hadoop"
 SPARK_CONF_DIR = "/etc/spark/conf"
 SPARK_RUNTIME_CONF_DIR = "/opt/spark/conf"
 NGINX_SITE_PATH = "/etc/nginx/sites-enabled/hailstack.conf"

@@ -578,6 +578,28 @@ def test_master_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
     assert "hdfs namenode -format -nonInteractive" in result
 
 
+def test_master_hadoop_config_is_visible_to_hdfs_format_and_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Write generated Hadoop XML where the installed Hadoop scripts read it."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    hadoop_conf_dir = "/opt/hadoop/etc/hadoop"
+    hdfs_site_write = f"{hadoop_conf_dir}/hdfs-site.xml"
+    format_command = "/opt/hadoop/bin/hdfs namenode -format -nonInteractive"
+    namenode_start = "systemctl restart hdfs-namenode"
+
+    assert f"{hadoop_conf_dir}/core-site.xml" in shell_script
+    assert hdfs_site_write in shell_script
+    assert "dfs.namenode.name.dir" in shell_script
+    assert "/etc/hadoop/conf/" not in shell_script
+    assert shell_script.index(hdfs_site_write) < shell_script.index(format_command)
+    assert shell_script.index(format_command) < shell_script.index(namenode_start)
+
+
 def test_master_cloud_init_prepares_spark_history_config_before_service_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -736,7 +758,7 @@ def test_master_cloud_init_installs_all_ssh_keys_during_config_stage(
     assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
     assert "#!/usr/bin/env bash" in shell_script
     assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
-    assert "/etc/hadoop/conf/core-site.xml" in shell_script
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in shell_script
 
 
 def test_worker_cloud_init_installs_all_ssh_keys_during_config_stage() -> None:
@@ -751,7 +773,7 @@ def test_worker_cloud_init_installs_all_ssh_keys_during_config_stage() -> None:
     assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
     assert "#!/usr/bin/env bash" in shell_script
     assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
-    assert "/etc/hadoop/conf/core-site.xml" in shell_script
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in shell_script
 
 
 def test_effective_runner_default_key_reaches_master_and_worker_cloud_init(
@@ -1063,8 +1085,8 @@ def test_hadoop_and_spark_config_use_dedicated_conf_directories(
 
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
-    assert "/etc/hadoop/conf/core-site.xml" in result
-    assert "/etc/hadoop/conf/hdfs-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
     assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/hadoop/hadoop-env.sh" not in result
@@ -1239,8 +1261,8 @@ def test_worker_config_uses_dedicated_conf_directories_only() -> None:
     """Write worker config to dedicated conf directories only."""
     result = generate_worker_cloud_init(_config(), _bundle(), _master_ip(), 1)
 
-    assert "/etc/hadoop/conf/core-site.xml" in result
-    assert "/etc/hadoop/conf/hdfs-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
     assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/netdata/stream.conf" in result

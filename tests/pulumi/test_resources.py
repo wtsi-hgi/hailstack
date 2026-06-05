@@ -1037,7 +1037,7 @@ def test_all_ssh_keys_are_present_in_master_and_worker_cloud_init(
         assert "ssh_authorized_keys:" in user_data
         assert "Content-Type: text/x-shellscript" in user_data
         assert "#!/usr/bin/env bash" in user_data
-        assert "/etc/hadoop/conf/core-site.xml" in user_data
+        assert "/opt/hadoop/etc/hadoop/core-site.xml" in user_data
         assert all(key in user_data for key in keys)
 
 
