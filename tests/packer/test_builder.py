@@ -42,19 +42,35 @@ from hailstack.packer.builder import (
 )
 
 
-def _write_config(path: Path) -> Path:
+def _write_config(
+    path: Path,
+    *,
+    cluster_floating_ip_pool: str = "",
+    packer_floating_ip_pool: str = "public",
+) -> Path:
     """Write a minimal build-image config file."""
+    cluster_pool_line = (
+        f'floating_ip_pool = "{cluster_floating_ip_pool}"\n'
+        if cluster_floating_ip_pool
+        else ""
+    )
+    packer_pool_line = (
+        f'floating_ip_pool = "{packer_floating_ip_pool}"\n'
+        if packer_floating_ip_pool
+        else ""
+    )
     path.write_text(
         (
             "[cluster]\n"
             'name = "test-cluster"\n'
             'master_flavour = "m2.medium"\n'
             'network_name = "private-net"\n'
+            f"{cluster_pool_line}"
             'ssh_username = "ubuntu"\n\n'
             "[packer]\n"
             'base_image = "ubuntu-22.04"\n'
             'flavour = "m2.large"\n'
-            'floating_ip_pool = "public"\n\n'
+            f"{packer_pool_line}\n"
             "[ssh_keys]\n"
             'public_keys = ["ssh-rsa AAAA"]\n\n'
             "[s3]\n"
@@ -151,6 +167,72 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert "network=private-net" in command
     assert "floating_ip_pool=public" in command
     assert not any(argument.startswith("image_name=") for argument in command)
+
+
+def test_build_image_reuses_cluster_floating_ip_pool_for_packer_when_unset(
+    tmp_path: Path,
+) -> None:
+    """Default Packer SSH reachability to the cluster floating IP pool."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            cluster_floating_ip_pool="public",
+            packer_floating_ip_pool="",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    assert "floating_ip_pool=public" in recorded_commands[0]
+
+
+def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
+    tmp_path: Path,
+) -> None:
+    """Allow the legacy Packer pool to override the cluster default."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            cluster_floating_ip_pool="cluster-public",
+            packer_floating_ip_pool="build-public",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    command = recorded_commands[0]
+    assert "floating_ip_pool=build-public" in command
+    assert "floating_ip_pool=cluster-public" not in command
 
 
 def test_build_image_runs_packer_from_template_directory(

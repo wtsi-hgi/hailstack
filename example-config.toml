@@ -14,11 +14,12 @@ network_name = "cloudforms_network"
 ssh_username = "ubuntu"
 monitoring = "netdata"
 # floating_ip = "1.2.3.4"
+# floating_ip_pool = "public"  # also used by build-image unless [packer] overrides
 
 [packer]
 base_image = "ubuntu-22.04"
 flavour = "m2.medium"
-# floating_ip_pool = "public"
+# floating_ip_pool = "build-public"  # optional build-image-specific override
 
 [volumes]
 create = true

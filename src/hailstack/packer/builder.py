@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hailstack.config.compatibility import Bundle
-from hailstack.config.schema import ClusterConfig
+from hailstack.config.schema import ClusterConfig, PackerConfig
 from hailstack.errors import PackerError
 from hailstack.runtime_paths import (
     PACKER_ROOT,
@@ -96,6 +96,7 @@ def _packer_vars(config: ClusterConfig, bundle: Bundle) -> dict[str, str]:
     """Build the documented Packer variable mapping for a bundle."""
     packer_config = config.validate_for_command("build-image").packer
     assert packer_config is not None
+    floating_ip_pool, _ = _packer_floating_ip_pool(config, packer_config)
 
     return {
         "bundle_id": bundle.id,
@@ -110,8 +111,41 @@ def _packer_vars(config: ClusterConfig, bundle: Bundle) -> dict[str, str]:
         "ssh_username": config.cluster.ssh_username,
         "flavor": packer_config.flavour,
         "network": config.cluster.network_name,
-        "floating_ip_pool": packer_config.floating_ip_pool,
+        "floating_ip_pool": floating_ip_pool,
     }
+
+
+def _packer_floating_ip_pool(
+    config: ClusterConfig,
+    packer_config: PackerConfig,
+) -> tuple[str, str]:
+    """Resolve the image-build floating IP pool and its config source."""
+    packer_pool = packer_config.floating_ip_pool.strip()
+    if packer_pool:
+        return packer_pool, "packer.floating_ip_pool"
+
+    cluster_pool = config.cluster.floating_ip_pool.strip()
+    if cluster_pool:
+        return cluster_pool, "cluster.floating_ip_pool"
+
+    return "", "none"
+
+
+def _log_packer_networking(
+    logger: logging.Logger,
+    config: ClusterConfig,
+) -> None:
+    """Log Packer networking choices without exposing credentials."""
+    packer_config = config.validate_for_command("build-image").packer
+    assert packer_config is not None
+    floating_ip_pool, source = _packer_floating_ip_pool(config, packer_config)
+
+    logger.info("Packer OpenStack network: %s", config.cluster.network_name)
+    if floating_ip_pool:
+        logger.info("Packer floating IP pool: %s (%s)", floating_ip_pool, source)
+        return
+
+    logger.info("Packer floating IP pool: none configured")
 
 
 def _packer_command(template_path: Path, variables: Mapping[str, str]) -> list[str]:
@@ -264,6 +298,7 @@ def build_image(
     active_logger = logger or logging.getLogger(__name__)
     resolved_template_path = template_path.resolve()
     _validate_packer_assets(resolved_template_path)
+    _log_packer_networking(active_logger, config)
     active_logger.info("Packer starting")
 
     result = runner(

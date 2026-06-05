@@ -119,7 +119,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    cp example-config.toml my-cluster.toml
    ```
 
-   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
+   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. If your runner cannot SSH directly to instances on `cluster.network_name`, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
 
    If you installed Hailstack via the SIF and do not have the repository checked out, copy `example-config.toml` out of the image first:
 
@@ -143,7 +143,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    chmod 600 .env
    ```
 
-4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image.
+4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; SSH must be reachable from the runner either through that network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`.
 
    ```bash
    hailstack build-image --config my-cluster.toml --dotenv .env
@@ -190,13 +190,13 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | `cluster.num_workers`         | Number of worker nodes to create. Must be at least `1`.                                                             | `integer` | `2`                                            | `4`                            |
 | `cluster.master_flavour`      | OpenStack flavour for the master VM.                                                                                | `string`  | required                                       | `m2.2xlarge`                   |
 | `cluster.worker_flavour`      | OpenStack flavour for workers. If omitted, Hailstack reuses `cluster.master_flavour`.                               | `string`  | `""` then resolved to `cluster.master_flavour` | `m2.2xlarge`                   |
-| `cluster.network_name`        | Required OpenStack network for the management interface on all nodes.                                               | `string`  | `cloudforms_network`                           | `cloudforms_network`           |
+| `cluster.network_name`        | Required OpenStack network for the management interface on all nodes and for Packer image-build instances.          | `string`  | `cloudforms_network`                           | `cloudforms_network`           |
 | `cluster.lustre_network`      | Optional second network name added to every node for Lustre access.                                                 | `string`  | `""`                                           | `lustre_network`               |
 | `cluster.lustre_mount_target` | Lustre mount target written to `/etc/fstab` when `cluster.lustre_network` is set.                                   | `string`  | `10.1.0.1@tcp:/fsx`                            | `192.0.2.10@tcp:/fsx`          |
 | `cluster.ssh_username`        | Login user used by SSH-based commands and cloud-init paths.                                                         | `string`  | `ubuntu`                                       | `ubuntu`                       |
 | `cluster.monitoring`          | Monitoring mode. Only `netdata` and `none` are accepted.                                                            | `string`  | `netdata`                                      | `netdata`                      |
 | `cluster.floating_ip`         | Existing unassociated IPv4 address to attach to the master. Leave empty to allocate one.                            | `string`  | `""`                                           | `1.2.3.4`                      |
-| `cluster.floating_ip_pool`    | Floating IP pool name used when `create` needs to allocate a master IP instead of reusing `cluster.floating_ip`.    | `string`  | `""`                                           | `public`                       |
+| `cluster.floating_ip_pool`    | Floating IP pool name used when `create` needs to allocate a master IP and, by default, when `build-image` needs a reachable Packer instance. | `string`  | `""`                                           | `public`                       |
 
 #### Finding Lustre Values
 
@@ -236,7 +236,7 @@ is the `cluster.lustre_mount_target` value.
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------- |
 | `packer.base_image`       | Source image name that Packer should boot before provisioning the Hailstack image.                                                                                                 | `string` | required when `[packer]` is present | `ubuntu-22.04` |
 | `packer.flavour`          | OpenStack flavour used during the image build.                                                                                                                                     | `string` | `m2.medium`                         | `m2.medium`    |
-| `packer.floating_ip_pool` | Floating IP pool name used by Packer while building an image. `create` uses `cluster.floating_ip_pool`, but the legacy packer field is still accepted for backwards compatibility. | `string` | `""`                                | `public`       |
+| `packer.floating_ip_pool` | Optional image-build override for the floating IP pool used by Packer. If blank, `build-image` uses `cluster.floating_ip_pool`; leave both blank only when the runner can SSH directly to `cluster.network_name`. | `string` | `""`                                | `public`       |
 
 ### `[volumes]`
 
@@ -372,6 +372,8 @@ hailstack reboot --config my-cluster.toml --dotenv .env --node my-cluster-worker
 ### `hailstack build-image`
 
 Synopsis: Build a Hailstack image for a selected compatibility bundle.
+
+Packer launches a temporary build instance on `cluster.network_name`. The machine running `hailstack build-image` must be able to SSH to that instance, either because `cluster.network_name` is runner-routable or because a floating IP pool is configured. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool.
 
 Options:
 
