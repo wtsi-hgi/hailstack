@@ -25,9 +25,14 @@
 
 import os
 from collections.abc import Sequence
+from email import policy
+from email.message import EmailMessage
+from hashlib import sha256
 from shlex import quote
 from uuid import uuid4
 from xml.sax.saxutils import escape
+
+import yaml
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import ConfigError
@@ -48,6 +53,7 @@ NETDATA_DIR = "/etc/netdata"
 NETDATA_STREAM_PATH = f"{NETDATA_DIR}/stream.conf"
 NETDATA_GO_D_PATH = f"{NETDATA_DIR}/go.d"
 NETDATA_HEALTH_D_PATH = f"{NETDATA_DIR}/health.d"
+CLOUD_INIT_EMAIL_POLICY = policy.default.clone(linesep="\n")
 
 
 def _env_var_or_placeholder(
@@ -132,6 +138,54 @@ def _worker_hosts_content(
 def _authorized_keys_content(config: ClusterConfig) -> str:
     """Render the login user's authorized_keys file content."""
     return "\n".join(config.ssh_keys.public_keys) + "\n"
+
+
+def _ssh_keys_cloud_config(config: ClusterConfig) -> str:
+    """Render config-stage SSH key installation for the login user."""
+    payload = {
+        "users": [
+            "default",
+            {
+                "name": config.cluster.ssh_username,
+                "ssh_authorized_keys": list(config.ssh_keys.public_keys),
+            },
+        ]
+    }
+    return "#cloud-config\n" + yaml.safe_dump(
+        payload,
+        default_flow_style=False,
+        sort_keys=False,
+        width=1_000_000,
+    )
+
+
+def _cloud_init_boundary(parts: Sequence[str]) -> str:
+    """Return a deterministic MIME boundary for a rendered cloud-init payload."""
+    digest = sha256()
+    for part in parts:
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return f"===============hailstack-cloud-init-{digest.hexdigest()[:32]}=="
+
+
+def _text_part(content: str, subtype: str) -> EmailMessage:
+    """Return a text MIME part with readable ASCII payloads where possible."""
+    part = EmailMessage(policy=CLOUD_INIT_EMAIL_POLICY)
+    if content.isascii():
+        part.set_content(content, subtype=subtype, cte="7bit")
+    else:
+        part.set_content(content, subtype=subtype)
+    return part
+
+
+def _cloud_init_multipart(cloud_config: str, shell_script: str) -> str:
+    """Render cloud-config and shellscript payloads as MIME user-data."""
+    message = EmailMessage(policy=CLOUD_INIT_EMAIL_POLICY)
+    message.set_type("multipart/mixed")
+    message.set_boundary(_cloud_init_boundary([cloud_config, shell_script]))
+    message.attach(_text_part(cloud_config, "cloud-config"))
+    message.attach(_text_part(shell_script, "x-shellscript"))
+    return message.as_string()
 
 
 def _xml_property(name: str, value: str) -> str:
@@ -620,7 +674,7 @@ def generate_master_cloud_init(
     attached_volume_id: str | None = None,
     allow_missing_runtime_secrets: bool = False,
 ) -> str:
-    """Return cloud-init user-data bash script for the master."""
+    """Return cloud-init user-data for the master."""
     web_password = _env_var_or_placeholder(
         "HAILSTACK_WEB_PASSWORD",
         "HAILSTACK_WEB_PASSWORD required",
@@ -686,7 +740,8 @@ def generate_master_cloud_init(
         *_extras_commands(config),
         *_service_commands(config),
     ]
-    return "\n".join(commands) + "\n"
+    shell_script = "\n".join(commands) + "\n"
+    return _cloud_init_multipart(_ssh_keys_cloud_config(config), shell_script)
 
 
 def generate_worker_cloud_init(
@@ -697,7 +752,7 @@ def generate_worker_cloud_init(
     worker_ips: Sequence[str] | None = None,
     netdata_api_key: str | None = None,
 ) -> str:
-    """Return cloud-init user-data bash script for a worker."""
+    """Return cloud-init user-data for a worker."""
     resolved_netdata_api_key = _resolve_netdata_api_key(netdata_api_key)
     username = config.cluster.ssh_username
     commands = [
@@ -742,7 +797,8 @@ def generate_worker_cloud_init(
         *_extras_commands(config),
         *_worker_service_commands(config),
     ]
-    return "\n".join(commands) + "\n"
+    shell_script = "\n".join(commands) + "\n"
+    return _cloud_init_multipart(_ssh_keys_cloud_config(config), shell_script)
 
 
 __all__ = ["generate_master_cloud_init", "generate_worker_cloud_init"]

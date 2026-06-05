@@ -24,9 +24,11 @@
 """Acceptance tests for D3 master cloud-init generation."""
 
 import re
+from email import message_from_string, policy
 from shlex import quote
 
 import pytest
+import yaml
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import ConfigError
@@ -45,6 +47,37 @@ def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
     )
     assert api_key_match is not None
     return api_key_match.group(1)
+
+
+def _cloud_init_part(rendered_cloud_init: str, content_type: str) -> str:
+    """Return the decoded content for a MIME cloud-init part."""
+    message = message_from_string(rendered_cloud_init, policy=policy.default)
+    assert message.is_multipart()
+    for part in message.iter_parts():
+        if part.get_content_type() == content_type:
+            content = part.get_content()
+            assert isinstance(content, str)
+            return content
+    raise AssertionError(f"missing cloud-init part {content_type}")
+
+
+def _cloud_config_users(rendered_cloud_init: str) -> list[object]:
+    """Return the parsed cloud-config users list from rendered user-data."""
+    cloud_config = _cloud_init_part(rendered_cloud_init, "text/cloud-config")
+    assert cloud_config.startswith("#cloud-config\n")
+    parsed = yaml.safe_load(cloud_config.removeprefix("#cloud-config\n"))
+    assert isinstance(parsed, dict)
+    users = parsed["users"]
+    assert isinstance(users, list)
+    return users
+
+
+def _ssh_user_entry(rendered_cloud_init: str, username: str) -> dict[str, object]:
+    """Return the configured cloud-config user entry by username."""
+    for user in _cloud_config_users(rendered_cloud_init):
+        if isinstance(user, dict) and user.get("name") == username:
+            return user
+    raise AssertionError(f"missing cloud-config user {username}")
 
 
 def _bundle() -> Bundle:
@@ -601,6 +634,39 @@ def test_all_ssh_public_keys_are_written_to_authorized_keys(
     assert "ssh-rsa AAAA user1@test" in result
     assert "ssh-rsa BBBB user2@test" in result
     assert "ssh-ed25519 CCCC user3@test" in result
+
+
+def test_master_cloud_init_installs_all_ssh_keys_during_config_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install every configured public key before the final shellscript runs."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config()
+
+    result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    ssh_user = _ssh_user_entry(result, "ubuntu")
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    assert "default" in _cloud_config_users(result)
+    assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
+    assert "#!/usr/bin/env bash" in shell_script
+    assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
+    assert "/etc/hadoop/conf/core-site.xml" in shell_script
+
+
+def test_worker_cloud_init_installs_all_ssh_keys_during_config_stage() -> None:
+    """Install worker SSH keys in cloud-config while preserving setup shellscript."""
+    config = _config()
+
+    result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+    ssh_user = _ssh_user_entry(result, "ubuntu")
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    assert "default" in _cloud_config_users(result)
+    assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
+    assert "#!/usr/bin/env bash" in shell_script
+    assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
+    assert "/etc/hadoop/conf/core-site.xml" in shell_script
 
 
 def test_s3_settings_inject_s3a_properties_into_core_site(
