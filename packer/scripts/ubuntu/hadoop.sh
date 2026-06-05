@@ -4,9 +4,57 @@ set -euo pipefail
 archive_path="/tmp/hadoop-${HADOOP_VERSION}.tar.gz"
 install_dir="/opt/hadoop-${HADOOP_VERSION}"
 
+hailstack_resolve_java_home() {
+	local candidate="${JAVA_HOME:-}"
+	local java_bin
+	local resolved_java_bin
+
+	if [[ -n "${candidate}" && -x "${candidate}/bin/java" ]]; then
+		printf '%s\n' "${candidate}"
+		return 0
+	fi
+
+	if java_bin="$(command -v javac 2>/dev/null)"; then
+		:
+	elif java_bin="$(command -v java 2>/dev/null)"; then
+		:
+	else
+		printf '[hailstack] unable to find java or javac on PATH while configuring Hadoop\n' >&2
+		return 1
+	fi
+
+	if ! resolved_java_bin="$(readlink -f "${java_bin}")"; then
+		printf '[hailstack] unable to resolve Java binary path: %s\n' "${java_bin}" >&2
+		return 1
+	fi
+
+	candidate="$(dirname "$(dirname "${resolved_java_bin}")")"
+	if [[ ! -x "${candidate}/bin/java" ]]; then
+		printf '[hailstack] discovered JAVA_HOME does not contain bin/java: %s\n' "${candidate}" >&2
+		return 1
+	fi
+
+	printf '%s\n' "${candidate}"
+}
+
+hailstack_write_hadoop_java_home() {
+	local hadoop_env="$1"
+
+	if [[ ! -f "${hadoop_env}" ]]; then
+		printf '[hailstack] Hadoop env file not found: %s\n' "${hadoop_env}" >&2
+		return 1
+	fi
+
+	printf '\nexport JAVA_HOME=%q\n' "${JAVA_HOME}" >>"${hadoop_env}"
+}
+
 curl -fsSL "https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz" -o "$archive_path"
 tar -xzf "$archive_path" -C /opt
 ln -sfn "$install_dir" /opt/hadoop
+
+JAVA_HOME="$(hailstack_resolve_java_home)"
+export JAVA_HOME
+hailstack_write_hadoop_java_home "${install_dir}/etc/hadoop/hadoop-env.sh"
 
 cat >/etc/systemd/system/hdfs-namenode.service <<'EOF'
 [Unit]

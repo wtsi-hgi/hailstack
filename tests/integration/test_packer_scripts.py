@@ -31,6 +31,7 @@ from typing import Final
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "base.sh"
+HADOOP_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "hadoop.sh"
 PACKAGES_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "packages.sh"
 UBUNTU_SCRIPTS_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu"
 VERSION_CHECK_PATTERN = re.compile(
@@ -141,6 +142,23 @@ def _rewrite_base_script(path: Path, temp_root: Path) -> Path:
     return rewritten_path
 
 
+def _rewrite_hadoop_script(path: Path, temp_root: Path) -> Path:
+    """Copy hadoop.sh into a temporary tree and rewrite absolute system paths."""
+    rewritten = path.read_text(encoding="utf-8")
+    replacements = (
+        ("/tmp/", f"{temp_root}/tmp/"),
+        ("/opt", str(temp_root / "opt")),
+        ("/etc/systemd/system", str(temp_root / "etc" / "systemd" / "system")),
+    )
+    for original, replacement in replacements:
+        rewritten = rewritten.replace(original, replacement)
+
+    rewritten_path = temp_root / "hadoop.sh"
+    rewritten_path.write_text(rewritten, encoding="utf-8")
+    rewritten_path.chmod(0o755)
+    return rewritten_path
+
+
 def test_o2_each_ubuntu_provisioner_script_ends_with_version_check_command() -> None:
     """Require every Ubuntu provisioner script to end with a version-check command."""
     offenders = [
@@ -229,6 +247,113 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_o2_hadoop_script_discovers_java_home_from_installed_java(
+    tmp_path: Path,
+) -> None:
+    """Discover JAVA_HOME for Hadoop when sudo -E does not provide it."""
+    temp_root = tmp_path / "root"
+    bin_dir, command_log = _stub_environment(tmp_path)
+    (temp_root / "tmp").mkdir(parents=True)
+    (temp_root / "opt").mkdir(parents=True)
+    (temp_root / "etc" / "systemd" / "system").mkdir(parents=True)
+    java_home = temp_root / "usr" / "lib" / "jvm" / "java-11-openjdk-amd64"
+    (java_home / "bin").mkdir(parents=True)
+    (java_home / "bin" / "java").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+        encoding="utf-8",
+    )
+    (java_home / "bin" / "java").chmod(0o755)
+    (bin_dir / "java").symlink_to(java_home / "bin" / "java")
+
+    _write_stub_command(
+        bin_dir / "curl",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'output_path=""\n'
+        'url=""\n'
+        "while (($# > 0)); do\n"
+        '  if [[ "$1" == "-o" ]]; then\n'
+        "    output_path=$2\n"
+        "    shift 2\n"
+        "    continue\n"
+        "  fi\n"
+        '  if [[ "$1" == http* ]]; then\n'
+        "    url=$1\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        'expected="https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz"\n'
+        'printf "curl %s -> %s\\n" "$url" "$output_path" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        '[[ "$url" == "$expected" ]]\n'
+        '[[ -n "$output_path" ]]\n'
+        'printf "hadoop archive\\n" >"$output_path"\n',
+    )
+    _write_stub_command(
+        bin_dir / "tar",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "tar %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'target=""\n'
+        "while (($# > 0)); do\n"
+        '  if [[ "$1" == "-C" ]]; then\n'
+        "    target=$2\n"
+        "    shift 2\n"
+        "    continue\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        '[[ -n "$target" ]]\n'
+        'install_dir="$target/hadoop-${HADOOP_VERSION}"\n'
+        'mkdir -p "$install_dir/bin" "$install_dir/etc/hadoop"\n'
+        'printf "# Hadoop env\\n" >"$install_dir/etc/hadoop/hadoop-env.sh"\n'
+        "cat >\"$install_dir/bin/hadoop\" <<'EOF'\n"
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'install_dir="$(cd "$(dirname "$0")/.." && pwd)"\n'
+        'env_file="${install_dir}/etc/hadoop/hadoop-env.sh"\n'
+        'if [[ -r "${env_file}" ]]; then\n'
+        '  source "${env_file}"\n'
+        "fi\n"
+        'if [[ -z "${JAVA_HOME:-}" ]]; then\n'
+        '  printf "ERROR: JAVA_HOME is not set and could not be found.\\n" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'printf "hadoop version JAVA_HOME=%s\\n" "${JAVA_HOME}" '
+        '>>"${HAILSTACK_COMMAND_LOG}"\n'
+        'printf "Hadoop %s\\n" "${HADOOP_VERSION}"\n'
+        "EOF\n"
+        'chmod +x "$install_dir/bin/hadoop"\n',
+    )
+    _write_stub_command(
+        bin_dir / "systemctl",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+
+    script_path = _rewrite_hadoop_script(HADOOP_SCRIPT_PATH, temp_root)
+    env = dict(os.environ)
+    env.update(MOCK_VERSION_ENV)
+    env.pop("JAVA_HOME", None)
+    env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    hadoop_env = temp_root / "opt" / "hadoop-3.4.1" / "etc" / "hadoop" / "hadoop-env.sh"
+
+    assert f"export JAVA_HOME={java_home}" in hadoop_env.read_text(encoding="utf-8")
+    assert f"hadoop version JAVA_HOME={java_home}" in command_log.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_o2_packages_script_installs_configured_scala_version(
