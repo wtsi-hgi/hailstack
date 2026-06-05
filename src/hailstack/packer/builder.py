@@ -714,6 +714,7 @@ def _packer_vars(
         "python_version": bundle.python,
         "scala_version": bundle.scala,
         "gnomad_version": bundle.gnomad,
+        "gnomad_methods_version": packer_config.gnomad_methods_version,
         "base_image": packer_config.base_image,
         "ssh_username": config.cluster.ssh_username,
         "flavor": packer_config.flavour,

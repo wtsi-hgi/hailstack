@@ -33,7 +33,13 @@ hailstack_verify_version() {
 }
 
 hailstack_apt_get update
-hailstack_apt_get install -y openjdk-${JAVA_VERSION}-jdk "${PYTHON_BIN}" python3-pip
+hailstack_apt_get install -y \
+	build-essential \
+	libpq-dev \
+	openjdk-${JAVA_VERSION}-jdk \
+	"${PYTHON_BIN}" \
+	"${PYTHON_BIN}-dev" \
+	python3-pip
 
 curl -fsSL "https://downloads.lightbend.com/scala/${SCALA_VERSION}/scala-${SCALA_VERSION}.deb" -o "${SCALA_DEB_PATH}"
 hailstack_apt_get install -y "${SCALA_DEB_PATH}"

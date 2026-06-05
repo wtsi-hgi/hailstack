@@ -486,6 +486,99 @@ def test_o2_packages_script_installs_configured_scala_version(
     assert not any(re.search(r"(^| )scala( |$)", line) for line in install_lines)
 
 
+def test_o2_packages_script_installs_python_native_build_dependencies(
+    tmp_path: Path,
+) -> None:
+    """Install native headers/tools needed by Python packages without cp312 wheels."""
+    bin_dir, command_log = _stub_environment(tmp_path)
+
+    _write_stub_command(
+        bin_dir / "apt-get",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "apt-get %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'for arg in "$@"; do\n'
+        '  if [[ "$arg" == */scala-"${SCALA_VERSION}".deb ]]; then\n'
+        "    exit 0\n"
+        "  fi\n"
+        "done\n",
+    )
+    _write_stub_command(
+        bin_dir / "curl",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'output_path=""\n'
+        "while (($# > 0)); do\n"
+        '  if [[ "$1" == "-o" ]]; then\n'
+        "    output_path=$2\n"
+        "    shift 2\n"
+        "    continue\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        '[[ -n "$output_path" ]]\n'
+        'printf "scala deb\\n" >"$output_path"\n',
+    )
+    _write_stub_command(
+        bin_dir / "java",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "openjdk version \\"11.0.28\\"\\n" >&2\n',
+    )
+    _write_stub_command(
+        bin_dir / "python3.12",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
+        '  printf "Python 3.12.13\\n"\n'
+        "fi\n",
+    )
+    _write_stub_command(
+        bin_dir / "scala",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "Scala code runner version %s -- Lightbend\\n" '
+        '"${SCALA_VERSION}" >&2\n',
+    )
+    _write_stub_command(
+        bin_dir / "fuser",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "systemctl",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+
+    env = dict(os.environ)
+    env.update(MOCK_VERSION_ENV)
+    env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+    env["HAILSTACK_PACKER_APT_HELPER"] = str(
+        REPOSITORY_ROOT / "packer" / "scripts" / "apt-locks.sh"
+    )
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["TMPDIR"] = str(tmp_path)
+
+    result = subprocess.run(
+        ["bash", str(PACKAGES_SCRIPT_PATH)],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    install_commands = [
+        line
+        for line in command_log.read_text(encoding="utf-8").splitlines()
+        if " install " in line
+    ]
+
+    assert any("build-essential" in line for line in install_commands)
+    assert any("libpq-dev" in line for line in install_commands)
+    assert any("python3.12-dev" in line for line in install_commands)
+
+
 def test_o2_gnomad_script_keeps_data_release_separate_from_package_pin(
     tmp_path: Path,
 ) -> None:

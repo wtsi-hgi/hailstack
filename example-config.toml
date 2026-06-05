@@ -21,6 +21,7 @@ monitoring = "netdata"
 base_image = "ubuntu-22.04"
 flavour = "m2.medium"
 # floating_ip_pool = "build-public"  # optional build-image-specific override
+# gnomad_methods_version = "0.8.2"  # Python gnomAD methods package version
 
 [volumes]
 create = true

@@ -39,6 +39,10 @@ variable "gnomad_version" {
   type = string
 }
 
+variable "gnomad_methods_version" {
+  type = string
+}
+
 variable "base_image" {
   type = string
 }
@@ -120,6 +124,7 @@ build {
       "PYTHON_VERSION=${var.python_version}",
       "SCALA_VERSION=${var.scala_version}",
       "GNOMAD_VERSION=${var.gnomad_version}",
+      "GNOMAD_METHODS_VERSION=${var.gnomad_methods_version}",
     ]
   }
 }

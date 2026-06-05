@@ -187,6 +187,7 @@ class PackerConfig(BaseModel):
     base_image: str
     flavour: str = "m2.medium"
     floating_ip_pool: str = ""
+    gnomad_methods_version: str = "0.8.2"
 
     @field_validator("base_image")
     @classmethod
@@ -194,6 +195,14 @@ class PackerConfig(BaseModel):
         """Reject blank base-image values when packer settings are present."""
         if not value.strip():
             raise ValueError("packer.base_image required")
+        return value
+
+    @field_validator("gnomad_methods_version")
+    @classmethod
+    def validate_gnomad_methods_version(cls, value: str) -> str:
+        """Reject blank gnomAD methods package versions."""
+        if not value.strip():
+            raise ValueError("packer.gnomad_methods_version cannot be empty")
         return value
 
 

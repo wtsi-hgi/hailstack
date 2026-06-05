@@ -238,6 +238,7 @@ is the `cluster.lustre_mount_target` value.
 | `packer.base_image`       | Source image name that Packer should boot before provisioning the Hailstack image.                                                                                                 | `string` | required when `[packer]` is present | `ubuntu-22.04` |
 | `packer.flavour`          | OpenStack flavour used during the image build.                                                                                                                                     | `string` | `m2.medium`                         | `m2.medium`    |
 | `packer.floating_ip_pool` | Optional image-build override for the floating IP pool used by Packer. If blank, `build-image` uses `cluster.floating_ip_pool`; leave both blank only when the runner can SSH directly to `cluster.network_name`. | `string` | `""`                                | `public`       |
+| `packer.gnomad_methods_version` | Python `gnomad` methods package version installed into the image; this is separate from the gnomAD data release in the compatibility bundle.                                | `string` | `0.8.2`                             | `0.8.2`        |
 
 ### `[volumes]`
 

@@ -72,6 +72,7 @@ def _write_config(
     lustre_network: str = "",
     cluster_floating_ip_pool: str = "",
     packer_floating_ip_pool: str = "",
+    gnomad_methods_version: str = "",
 ) -> Path:
     """Write a minimal build-image config file."""
     lustre_network_line = (
@@ -87,6 +88,11 @@ def _write_config(
         if packer_floating_ip_pool
         else ""
     )
+    gnomad_methods_line = (
+        f'gnomad_methods_version = "{gnomad_methods_version}"\n'
+        if gnomad_methods_version
+        else ""
+    )
     path.write_text(
         (
             "[cluster]\n"
@@ -99,7 +105,8 @@ def _write_config(
             "[packer]\n"
             'base_image = "ubuntu-22.04"\n'
             'flavour = "m2.large"\n'
-            f"{packer_pool_line}\n"
+            f"{packer_pool_line}"
+            f"{gnomad_methods_line}\n"
             "[ssh_keys]\n"
             'public_keys = ["ssh-rsa AAAA"]\n\n'
             "[s3]\n"
@@ -1816,6 +1823,68 @@ def test_build_image_maps_gnomad_version_to_packer_vars(tmp_path: Path) -> None:
     assert "gnomad_version=3.0.4" in recorded_commands[0]
 
 
+def test_build_image_maps_default_gnomad_methods_version_to_packer_vars(
+    tmp_path: Path,
+) -> None:
+    """Provide the default gnomAD methods package version to the template."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    command = recorded_commands[0]
+    assert "gnomad_version=3.0.4" in command
+    assert "gnomad_methods_version=0.8.2" in command
+
+
+def test_build_image_maps_configured_gnomad_methods_version_to_packer_vars(
+    tmp_path: Path,
+) -> None:
+    """Allow build-image configs to override the gnomAD methods package version."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            gnomad_methods_version="0.8.1",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    assert "gnomad_methods_version=0.8.1" in recorded_commands[0]
+    assert "gnomad_methods_version=0.8.2" not in recorded_commands[0]
+
+
 def test_build_image_returns_uploaded_image_id(tmp_path: Path) -> None:
     """Return the Packer-reported image ID from the build output."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -1935,6 +2004,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "python_version",
         "scala_version",
         "gnomad_version",
+        "gnomad_methods_version",
         "base_image",
         "ssh_username",
         "flavor",
@@ -1957,6 +2027,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "PYTHON_VERSION",
         "SCALA_VERSION",
         "GNOMAD_VERSION",
+        "GNOMAD_METHODS_VERSION",
     ):
         assert f'"{env_name}=${{var.' in template
 
@@ -2172,6 +2243,7 @@ def test_e2_packer_template_validates_with_packer_cli() -> None:
                 "PYTHON_VERSION": "3.12",
                 "SCALA_VERSION": "2.12.18",
                 "GNOMAD_VERSION": "3.0.4",
+                "GNOMAD_METHODS_VERSION": "0.8.2",
             },
             id="latest-bundle",
         ),
@@ -2195,6 +2267,7 @@ def test_e2_packer_template_validates_with_packer_cli() -> None:
                 "PYTHON_VERSION": "3.12",
                 "SCALA_VERSION": "2.12.18",
                 "GNOMAD_VERSION": "3.0.4",
+                "GNOMAD_METHODS_VERSION": "0.8.2",
             },
             id="supported-bundle",
         ),
