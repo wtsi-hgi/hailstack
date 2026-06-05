@@ -948,6 +948,9 @@ def test_openstack_build_port_manager_creates_ports_with_expected_security(
 
     assert management_port_id == MANAGEMENT_PORT_UUID
     assert lustre_port_id == LUSTRE_PORT_UUID
+    lustre_create_command = openstack_commands[1]
+    assert "--no-security-group" in lustre_create_command
+    assert "--disable-port-security" not in lustre_create_command
     assert openstack_commands == [
         [
             "openstack",
@@ -971,7 +974,6 @@ def test_openstack_build_port_manager_creates_ports_with_expected_security(
             "--network",
             RESOLVED_LUSTRE_NETWORK_UUID,
             "--no-security-group",
-            "--disable-port-security",
             "hailstack-packer-lustre-aaaaaaaa",
             "-f",
             "json",

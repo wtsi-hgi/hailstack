@@ -266,7 +266,7 @@ class _OpenStackBuildPortManager:
         )
 
     def create_lustre_port(self, *, network_id: str) -> str:
-        """Create the Lustre port without security groups or port security."""
+        """Create the Lustre port without security groups."""
         name = _temporary_packer_port_name(_PACKER_LUSTRE_PORT_NAME_PREFIX)
         return _run_openstack_port_create_command(
             [
@@ -276,7 +276,6 @@ class _OpenStackBuildPortManager:
                 "--network",
                 network_id,
                 "--no-security-group",
-                "--disable-port-security",
                 name,
                 "-f",
                 "json",
