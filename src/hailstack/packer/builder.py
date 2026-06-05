@@ -26,7 +26,8 @@
 import logging
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
@@ -286,6 +287,21 @@ def _validate_packer_assets(template_path: Path) -> None:
         raise PackerError(f"Missing required Packer assets: {'; '.join(problems)}")
 
 
+@contextmanager
+def _normalized_relative_packer_log_path() -> Iterator[None]:
+    """Resolve relative PACKER_LOG_PATH values before Packer changes cwd."""
+    log_path = os.environ.get("PACKER_LOG_PATH")
+    if not log_path or Path(log_path).is_absolute():
+        yield
+        return
+
+    os.environ["PACKER_LOG_PATH"] = str(Path.cwd() / log_path)
+    try:
+        yield
+    finally:
+        os.environ["PACKER_LOG_PATH"] = log_path
+
+
 def build_image(
     config: ClusterConfig,
     bundle: Bundle,
@@ -301,10 +317,11 @@ def build_image(
     _log_packer_networking(active_logger, config)
     active_logger.info("Packer starting")
 
-    result = runner(
-        _packer_command(resolved_template_path, _packer_vars(config, bundle)),
-        cwd=resolved_template_path.parent,
-    )
+    with _normalized_relative_packer_log_path():
+        result = runner(
+            _packer_command(resolved_template_path, _packer_vars(config, bundle)),
+            cwd=resolved_template_path.parent,
+        )
     if result.returncode != 0:
         raise PackerError(_packer_failure_detail(result))
 

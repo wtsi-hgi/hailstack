@@ -23,6 +23,7 @@
 
 """Acceptance tests for packer image building."""
 
+import os
 import re
 import shutil
 import subprocess
@@ -269,6 +270,82 @@ def test_build_image_runs_packer_from_template_directory(
     )
 
     assert recorded_commands[0][-1] == str(template_path)
+    assert recorded_cwds == [template_path.parent]
+
+
+def test_build_image_resolves_relative_packer_log_path_from_caller_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep user-supplied relative Packer log paths rooted at the caller cwd."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_dir = tmp_path / "venv" / "lib" / "python3.14" / "site-packages"
+    template_dir = template_dir / "hailstack" / "_data" / "packer"
+    template_dir.mkdir(parents=True)
+    template_path = _write_template_assets(template_dir)
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    monkeypatch.chdir(caller_dir)
+    monkeypatch.setenv("PACKER_LOG_PATH", "packer-debug.log")
+    recorded_log_paths: list[str] = []
+    recorded_cwds: list[Path] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command
+        recorded_log_paths.append(os.environ["PACKER_LOG_PATH"])
+        recorded_cwds.append(cwd)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    assert recorded_log_paths == [str(caller_dir / "packer-debug.log")]
+    assert recorded_cwds == [template_path.parent]
+
+
+def test_build_image_preserves_absolute_packer_log_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leave absolute Packer log paths unchanged."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    template_path = _write_template_assets(template_dir)
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    absolute_log_path = tmp_path / "logs" / "packer-debug.log"
+    monkeypatch.chdir(caller_dir)
+    monkeypatch.setenv("PACKER_LOG_PATH", str(absolute_log_path))
+    recorded_log_paths: list[str] = []
+    recorded_cwds: list[Path] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command
+        recorded_log_paths.append(os.environ["PACKER_LOG_PATH"])
+        recorded_cwds.append(cwd)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    assert recorded_log_paths == [str(absolute_log_path)]
     assert recorded_cwds == [template_path.parent]
 
 
