@@ -33,6 +33,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "base.sh"
 HADOOP_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "hadoop.sh"
 PACKAGES_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "packages.sh"
+GNOMAD_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "gnomad.sh"
 UBUNTU_SCRIPTS_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu"
 VERSION_CHECK_PATTERN = re.compile(
     r'(grep -F "\$\{?[A-Z0-9_]+_VERSION\}?"|'
@@ -154,6 +155,19 @@ def _rewrite_hadoop_script(path: Path, temp_root: Path) -> Path:
         rewritten = rewritten.replace(original, replacement)
 
     rewritten_path = temp_root / "hadoop.sh"
+    rewritten_path.write_text(rewritten, encoding="utf-8")
+    rewritten_path.chmod(0o755)
+    return rewritten_path
+
+
+def _rewrite_gnomad_script(path: Path, temp_root: Path) -> Path:
+    """Copy gnomad.sh into a temporary tree and rewrite absolute system paths."""
+    rewritten = path.read_text(encoding="utf-8").replace(
+        "/opt/hailstack",
+        str(temp_root / "opt" / "hailstack"),
+    )
+
+    rewritten_path = temp_root / "gnomad.sh"
     rewritten_path.write_text(rewritten, encoding="utf-8")
     rewritten_path.chmod(0o755)
     return rewritten_path
@@ -470,3 +484,60 @@ def test_o2_packages_script_installs_configured_scala_version(
     )
     assert any("scala-2.12.18.deb" in line for line in install_lines)
     assert not any(re.search(r"(^| )scala( |$)", line) for line in install_lines)
+
+
+def test_o2_gnomad_script_keeps_data_release_separate_from_package_pin(
+    tmp_path: Path,
+) -> None:
+    """Install gnomAD methods without using the data release as a package version."""
+    temp_root = tmp_path / "root"
+    base_venv = temp_root / "opt" / "hailstack" / "base-venv"
+    bin_dir = base_venv / "bin"
+    command_log = tmp_path / "commands.log"
+    bin_dir.mkdir(parents=True)
+
+    _write_stub_command(
+        bin_dir / "uv",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "uv %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'for arg in "$@"; do\n'
+        '  if [[ "$arg" == "gnomad==${GNOMAD_VERSION}" ]]; then\n'
+        '    printf "data release used as package pin\\n" >&2\n'
+        "    exit 42\n"
+        "  fi\n"
+        "done\n"
+        '[[ "$*" == *"gnomad=="* ]]\n',
+    )
+    _write_stub_command(
+        bin_dir / "python",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "python %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        '[[ "${1:-}" == "-c" ]]\n'
+        '[[ "$*" == *"import gnomad"* ]]\n'
+        '[[ "$*" == *"importlib.metadata.version"* ]]\n'
+        'printf "gnomAD data release %s via gnomad package 0.8.2\\n" '
+        '"$GNOMAD_VERSION"\n',
+    )
+
+    script_path = _rewrite_gnomad_script(GNOMAD_SCRIPT_PATH, temp_root)
+    env = dict(os.environ)
+    env.update(MOCK_VERSION_ENV)
+    env["GNOMAD_METHODS_VERSION"] = "0.8.2"
+    env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+
+    assert any("gnomad==0.8.2" in line for line in commands)
+    assert not any("gnomad==3.0.4" in line for line in commands)

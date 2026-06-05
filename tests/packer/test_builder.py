@@ -2264,7 +2264,9 @@ def test_e2_base_venv_preinstalls_are_declared_via_uv() -> None:
         PACKER_SCRIPTS_PATH / "ubuntu/gnomad.sh": [
             "test -d /opt/hailstack/base-venv",
             "/opt/hailstack/base-venv/bin/uv pip install",
-            '"gnomad==${GNOMAD_VERSION}"',
+            'GNOMAD_METHODS_VERSION="${GNOMAD_METHODS_VERSION:-0.8.2}"',
+            '"gnomad==${GNOMAD_METHODS_VERSION}"',
+            "importlib.metadata.version",
         ],
         PACKER_SCRIPTS_PATH / "ubuntu/uv.sh": [
             "test -d /opt/hailstack/base-venv",
