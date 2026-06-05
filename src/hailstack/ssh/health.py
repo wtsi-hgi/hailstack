@@ -24,6 +24,7 @@
 """Async SSH health probes for cluster services and resource usage."""
 
 import asyncio
+import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -230,7 +231,7 @@ async def _run_ssh_command(
                 ssh_command.extend(["-i", str(ssh_key_path)])
             if host.jump_host:
                 ssh_command.extend(["-J", f"{ssh_username}@{host.jump_host}"])
-            ssh_command.extend([f"{ssh_username}@{host.address}", *command])
+            ssh_command.extend([f"{ssh_username}@{host.address}", shlex.join(command)])
             process = await asyncio.create_subprocess_exec(
                 *ssh_command,
                 stdout=asyncio.subprocess.PIPE,

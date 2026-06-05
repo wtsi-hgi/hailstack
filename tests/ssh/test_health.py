@@ -24,6 +24,7 @@
 """Acceptance tests for the H2 SSH health probe module."""
 
 import asyncio
+import shlex
 from pathlib import Path
 
 import pytest
@@ -271,6 +272,50 @@ def test_run_ssh_command_passes_explicit_ssh_key(
     ]
     assert "-i" in captured_args
     assert str(ssh_key_path) in captured_args
+
+
+def test_run_ssh_command_quotes_complex_remote_commands_as_single_ssh_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve remote command argument boundaries through OpenSSH."""
+    captured_args: list[object] = []
+    remote_command = (
+        "sh",
+        "-lc",
+        "top -bn1 | awk '/^%Cpu/ {print 100 - $8}' && "
+        "free | awk '/Mem:/ {print ($3/$2)*100}' && "
+        "df -P / | awk 'NR==2 {gsub(/%/, \"\", $5); print $5}'",
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"23\n45.5\n12\n", b""
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        del kwargs
+        captured_args.extend(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(name="master", address="master"),
+            "ubuntu",
+            remote_command,
+        )
+    )
+
+    destination_index = captured_args.index("ubuntu@master")
+    remote_args = captured_args[destination_index + 1 :]
+    assert result == "23\n45.5\n12\n"
+    assert remote_args == [shlex.join(remote_command)]
 
 
 def test_run_ssh_command_allows_expected_non_zero_exit_codes(
