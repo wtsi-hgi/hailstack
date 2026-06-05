@@ -67,14 +67,29 @@ _MAX_PACKER_DIAGNOSTIC_LINES = 8
 class PackerRunner(Protocol):
     """Define the callable shape used to execute the Packer CLI."""
 
-    def __call__(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         """Run a prepared Packer command and return its completed process."""
         ...
 
 
-def _run_packer(command: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_packer(
+    command: list[str],
+    *,
+    cwd: Path,
+) -> subprocess.CompletedProcess[str]:
     """Execute a Packer build command in a mockable wrapper."""
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=cwd,
+    )
 
 
 def _packer_vars(config: ClusterConfig, bundle: Bundle) -> dict[str, str]:
@@ -247,10 +262,14 @@ def build_image(
 ) -> str:
     """Run packer build using config.packer settings and return the image ID."""
     active_logger = logger or logging.getLogger(__name__)
-    _validate_packer_assets(template_path)
+    resolved_template_path = template_path.resolve()
+    _validate_packer_assets(resolved_template_path)
     active_logger.info("Packer starting")
 
-    result = runner(_packer_command(template_path, _packer_vars(config, bundle)))
+    result = runner(
+        _packer_command(resolved_template_path, _packer_vars(config, bundle)),
+        cwd=resolved_template_path.parent,
+    )
     if result.returncode != 0:
         raise PackerError(_packer_failure_detail(result))
 

@@ -119,7 +119,11 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -140,6 +144,43 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert not any(argument.startswith("image_name=") for argument in command)
 
 
+def test_build_image_runs_packer_from_template_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run Packer where relative provisioner script paths are resolvable."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_dir = tmp_path / "venv" / "lib" / "python3.14" / "site-packages"
+    template_dir = template_dir / "hailstack" / "_data" / "packer"
+    template_dir.mkdir(parents=True)
+    template_path = _write_template_assets(template_dir)
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    monkeypatch.chdir(caller_dir)
+    recorded_commands: list[list[str]] = []
+    recorded_cwds: list[Path] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        recorded_commands.append(command)
+        recorded_cwds.append(cwd)
+        assert Path.cwd() == caller_dir
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    assert recorded_commands[0][-1] == str(template_path)
+    assert recorded_cwds == [template_path.parent]
+
+
 def test_builder_vars_match_checked_in_template_contract(tmp_path: Path) -> None:
     """Keep the builder var set aligned with the checked-in HCL declarations."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -158,7 +199,11 @@ def test_build_image_raises_packer_error_with_stderr_output_on_failure(
     config = load_config(_write_config(tmp_path / "cluster.toml"))
     template_path = _write_template_assets(tmp_path)
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         del command
         return _result("", stderr="template failed", returncode=1)
 
@@ -187,7 +232,11 @@ def test_build_image_failure_summarizes_machine_readable_packer_output(
         )
     )
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         del command
         return _result(packer_output, returncode=1)
 
@@ -213,7 +262,11 @@ def test_build_image_maps_hadoop_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -233,7 +286,11 @@ def test_build_image_maps_spark_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -253,7 +310,11 @@ def test_build_image_maps_hail_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -273,7 +334,11 @@ def test_build_image_maps_java_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -293,7 +358,11 @@ def test_build_image_maps_python_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -313,7 +382,11 @@ def test_build_image_maps_scala_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -333,7 +406,11 @@ def test_build_image_maps_gnomad_version_to_packer_vars(tmp_path: Path) -> None:
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -352,7 +429,11 @@ def test_build_image_returns_uploaded_image_id(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path / "cluster.toml"))
     template_path = _write_template_assets(tmp_path)
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         del command
         return _result("1700000000,,artifact,0,id,image-123\n")
 
@@ -374,7 +455,11 @@ def test_build_image_does_not_pass_secrets_or_cluster_specific_config(
     template_path = _write_template_assets(tmp_path)
     recorded_commands: list[list[str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         recorded_commands.append(command)
         return _result("artifact,0,id,image-123\n")
 
@@ -400,7 +485,11 @@ def test_build_image_fails_before_runner_when_template_assets_missing(
     template_path = tmp_path / "hailstack.pkr.hcl"
     template_path.write_text('source "null" "noop" {}\n', encoding="utf-8")
 
-    def fail_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
         del command
         raise AssertionError("runner should not be called")
 
