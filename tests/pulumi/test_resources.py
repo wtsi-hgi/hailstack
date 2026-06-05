@@ -305,7 +305,7 @@ def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
 def test_num_workers_creates_master_keypair_ports_and_instances(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Create one tagged keypair, four main ports, and four instances."""
+    """Create one narrow keypair payload, four main ports, and four instances."""
     mocks, _, _ = _run_stack(_config(), monkeypatch)
 
     keypairs = _resource_inputs(mocks, "openstack:compute/keypair:Keypair")
@@ -314,10 +314,10 @@ def test_num_workers_creates_master_keypair_ports_and_instances(
 
     assert len(keypairs) == 1
     assert keypairs[0]["name"] == "test-cluster-keypair"
-    assert keypairs[0]["value_specs"] == {
-        "cluster_name": "test-cluster",
-        "tags": "test-cluster",
-    }
+    assert keypairs[0]["public_key"] == "ssh-ed25519 AAAA primary@test"
+    assert "value_specs" not in keypairs[0]
+    assert "cluster_name" not in keypairs[0]
+    assert "tags" not in keypairs[0]
     assert len(ports) == 4
     assert len(instances) == 4
     assert {instance["name"] for instance in instances} == {

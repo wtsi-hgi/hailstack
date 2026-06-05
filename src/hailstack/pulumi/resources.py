@@ -90,7 +90,6 @@ def create_cluster_resources(
         keypair_name,
         name=keypair_name,
         public_key=public_keys[0],
-        value_specs=_cluster_value_specs(cluster_name),
     )
 
     master_security_group = SecGroup(
