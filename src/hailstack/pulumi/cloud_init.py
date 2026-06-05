@@ -39,6 +39,7 @@ from hailstack.errors import ConfigError
 
 HADOOP_CONF_DIR = "/etc/hadoop/conf"
 SPARK_CONF_DIR = "/etc/spark/conf"
+SPARK_RUNTIME_CONF_DIR = "/opt/spark/conf"
 NGINX_SITE_PATH = "/etc/nginx/sites-enabled/hailstack.conf"
 HTPASSWD_PATH = "/etc/nginx/.hailstack-htpasswd"
 SSL_CERT_PATH = "/etc/nginx/ssl/hailstack.crt"
@@ -250,6 +251,20 @@ def _spark_defaults_content(config: ClusterConfig, bundle: Bundle) -> str:
         )
         + "\n"
     )
+
+
+def _spark_defaults_commands(config: ClusterConfig, bundle: Bundle) -> list[str]:
+    """Render Spark defaults commands visible to Spark's packaged scripts."""
+    managed_path = f"{SPARK_CONF_DIR}/spark-defaults.conf"
+    runtime_path = f"{SPARK_RUNTIME_CONF_DIR}/spark-defaults.conf"
+    return [
+        *_here_doc(
+            managed_path,
+            "EOF_SPARK_DEFAULTS",
+            _spark_defaults_content(config, bundle),
+        ),
+        f"ln -sfn {managed_path} {runtime_path}",
+    ]
 
 
 def _jupyter_config_content(web_password: str) -> str:
@@ -641,7 +656,7 @@ def _worker_netdata_commands(
 
 def _worker_install_directories(config: ClusterConfig) -> str:
     """Render worker install directories, omitting Netdata paths when disabled."""
-    directories = [HADOOP_CONF_DIR, SPARK_CONF_DIR]
+    directories = [HADOOP_CONF_DIR, SPARK_CONF_DIR, SPARK_RUNTIME_CONF_DIR]
     if _netdata_enabled(config):
         directories.insert(0, NETDATA_DIR)
     return "install -d -m 0755 " + " ".join(directories)
@@ -657,6 +672,7 @@ def _master_install_directories(config: ClusterConfig) -> str:
         "/etc/nginx/ssl",
         HADOOP_CONF_DIR,
         SPARK_CONF_DIR,
+        SPARK_RUNTIME_CONF_DIR,
         "/etc/jupyter",
         "/etc/exports.d",
     ]
@@ -718,11 +734,7 @@ def generate_master_cloud_init(
             "EOF_HDFS_SITE",
             _hdfs_site_content(config),
         ),
-        *_here_doc(
-            f"{SPARK_CONF_DIR}/spark-defaults.conf",
-            "EOF_SPARK_DEFAULTS",
-            _spark_defaults_content(config, bundle),
-        ),
+        *_spark_defaults_commands(config, bundle),
         *_here_doc(
             "/etc/jupyter/jupyter_server_config.py",
             "EOF_JUPYTER_CONFIG",
@@ -783,11 +795,7 @@ def generate_worker_cloud_init(
             "EOF_HDFS_SITE",
             _worker_hdfs_site_content(config),
         ),
-        *_here_doc(
-            f"{SPARK_CONF_DIR}/spark-defaults.conf",
-            "EOF_SPARK_DEFAULTS",
-            _spark_defaults_content(config, bundle),
-        ),
+        *_spark_defaults_commands(config, bundle),
         *_worker_spark_commands(),
         *_worker_netdata_commands(config, master_ip, resolved_netdata_api_key),
         *_worker_volume_commands(config, master_ip),

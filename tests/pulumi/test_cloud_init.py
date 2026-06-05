@@ -522,6 +522,35 @@ def test_master_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
     assert "hdfs namenode -format -nonInteractive" in result
 
 
+def test_master_cloud_init_prepares_spark_history_config_before_service_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare the Spark history log directory before activating the service."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+    )
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    etc_spark_defaults = "/etc/spark/conf/spark-defaults.conf"
+    opt_spark_defaults = "/opt/spark/conf/spark-defaults.conf"
+    history_dir = "/home/ubuntu/data/spark-history"
+    history_install = (
+        "install -d -m 0755 /home/ubuntu/data /home/ubuntu/data/hdfs "
+        f"/home/ubuntu/data/hdfs/name {history_dir}"
+    )
+    spark_defaults_link = f"ln -sfn {etc_spark_defaults} {opt_spark_defaults}"
+    history_start = "systemctl restart spark-history-server"
+
+    assert spark_defaults_link in shell_script
+    assert f"spark.history.fs.logDirectory file://{history_dir}" in shell_script
+    assert shell_script.index(spark_defaults_link) < shell_script.index(history_start)
+    assert shell_script.index(history_install) < shell_script.index(history_start)
+
+
 def test_worker_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
