@@ -146,6 +146,9 @@ def _authorized_keys_content(config: ClusterConfig) -> str:
 def _cloud_config(config: ClusterConfig) -> str:
     """Render early boot and config-stage cloud-init settings."""
     payload = {
+        "package_update": False,
+        "package_upgrade": False,
+        "package_reboot_if_required": False,
         "bootcmd": _first_boot_cleanup_commands(config),
         "users": [
             "default",

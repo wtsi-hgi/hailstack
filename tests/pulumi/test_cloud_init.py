@@ -147,6 +147,50 @@ def _master_ip() -> str:
     return "10.0.0.10"
 
 
+def test_cloud_config_overrides_baked_package_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disable baked image package updates during first boot."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+
+        assert cloud_config["package_update"] is False
+        assert cloud_config["package_upgrade"] is False
+        assert cloud_config["package_reboot_if_required"] is False
+        assert "systemctl mask --force mountLustre.service || true" in joined_bootcmd
+        assert "metricbeat-openstack-setup.service" in joined_bootcmd
+        assert (
+            "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26 "
+            "/lustre lustre defaults,_netdev 0 0"
+        ) in joined_bootcmd
+        assert (
+            _ssh_user_entry(rendered_cloud_init, "ubuntu")["ssh_authorized_keys"]
+            == config.ssh_keys.public_keys
+        )
+
+
 def test_monitoring_netdata_enables_netdata_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
