@@ -400,6 +400,111 @@ def test_openstack_get_image_selects_newest_active_duplicate_name(
     ]
 
 
+def test_openstack_get_image_fetches_image_show_timestamps_for_duplicate_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve duplicate active images when list rows omit timestamp fields."""
+    image_name = "hailstack-hail-0.2.137-gnomad-3.0.4-r2"
+    older_image_id = "e49f3d46-54e4-4ec2-9241-1c560bcaf5c3"
+    newer_image_id = "19d4a6df-7435-4734-991a-c1629506659e"
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, check, text
+        commands.append(command)
+        if command == [
+            "openstack",
+            "image",
+            "show",
+            newer_image_id,
+            "-f",
+            "json",
+        ]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "id": newer_image_id,
+                        "name": image_name,
+                        "created_at": "2026-06-05T21:22:58Z",
+                        "updated_at": "2026-06-05T21:29:37Z",
+                    }
+                ),
+                stderr="",
+            )
+        if command == [
+            "openstack",
+            "image",
+            "show",
+            older_image_id,
+            "-f",
+            "json",
+        ]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "id": older_image_id,
+                        "name": image_name,
+                        "created_at": "2026-06-05T18:09:16Z",
+                        "updated_at": "2026-06-05T18:17:10Z",
+                    }
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                [
+                    {
+                        "ID": newer_image_id,
+                        "Name": image_name,
+                        "Status": "active",
+                    },
+                    {
+                        "ID": older_image_id,
+                        "Name": image_name,
+                        "Status": "active",
+                    },
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+
+    image = create_module.OpenStackCLIClient().get_image(image_name)
+
+    assert image is not None
+    assert getattr(image, "id", None) == newer_image_id
+    assert getattr(image, "name", None) == image_name
+    assert commands == [
+        [
+            "openstack",
+            "image",
+            "list",
+            "--name",
+            image_name,
+            "--status",
+            "active",
+            "--long",
+            "-f",
+            "json",
+        ],
+        ["openstack", "image", "show", newer_image_id, "-f", "json"],
+        ["openstack", "image", "show", older_image_id, "-f", "json"],
+    ]
+
+
 def test_openstack_required_show_retries_transient_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -122,6 +122,7 @@ class _OpenStackImageCandidate:
 
     image: OpenStackImage
     created_at: datetime | None
+    updated_at: datetime | None
 
 
 class OpenStackPreflightClient(Protocol):
@@ -243,7 +244,13 @@ class OpenStackCLIClient:
                 "json",
             ]
         )
-        return _select_newest_active_image(name, rows)
+        candidates = _image_candidates_from_rows(name, rows)
+        if _image_candidates_need_detailed_timestamps(candidates):
+            candidates = [
+                self._image_candidate_with_show_timestamps(candidate)
+                for candidate in candidates
+            ]
+        return _select_newest_image_candidate(candidates)
 
     def get_flavour(self, name: str) -> FlavorDetails | None:
         """Return flavour details when the flavour exists."""
@@ -495,6 +502,18 @@ class OpenStackCLIClient:
             return None
         return server_id.strip()
 
+    def _image_candidate_with_show_timestamps(
+        self,
+        candidate: _OpenStackImageCandidate,
+    ) -> _OpenStackImageCandidate:
+        """Return an image candidate enriched with detailed show timestamps."""
+        payload = self._run_optional_show(
+            ["openstack", "image", "show", candidate.image.id, "-f", "json"]
+        )
+        if payload is None:
+            return candidate
+        return _image_candidate_with_detail_payload(candidate, payload)
+
 
 def _openstack_show_failed_not_found(detail: str) -> bool:
     """Return true when an OpenStack show failure represents a missing resource."""
@@ -517,20 +536,36 @@ def _looks_like_transient_openstack_error(detail: str) -> bool:
     return any(marker in lowered for marker in _TRANSIENT_OPENSTACK_ERROR_MARKERS)
 
 
-def _select_newest_active_image(
+def _image_candidates_from_rows(
     image_name: str,
     rows: list[dict[str, object]],
-) -> OpenStackImage | None:
-    """Return the newest active image with the requested name."""
-    candidates = [
+) -> list[_OpenStackImageCandidate]:
+    """Return active image candidates matching the requested name."""
+    return [
         candidate
         for row in rows
         if (candidate := _image_candidate_from_row(row, image_name)) is not None
     ]
+
+
+def _select_newest_image_candidate(
+    candidates: list[_OpenStackImageCandidate],
+) -> OpenStackImage | None:
+    """Return the newest image from already-filtered candidates."""
     if not candidates:
         return None
 
     return max(candidates, key=_image_candidate_sort_key).image
+
+
+def _image_candidates_need_detailed_timestamps(
+    candidates: list[_OpenStackImageCandidate],
+) -> bool:
+    """Return whether duplicate candidates need per-image timestamp details."""
+    return len(candidates) > 1 and any(
+        _image_candidate_primary_timestamp(candidate) is None
+        for candidate in candidates
+    )
 
 
 def _image_candidate_from_row(
@@ -550,24 +585,66 @@ def _image_candidate_from_row(
     if image_id is None:
         raise NetworkError("OpenStack image list response missing image ID")
 
-    created_at = _parse_openstack_timestamp(
-        _optional_value_from_any(
-            row,
-            ("Created At", "created_at", "createdAt", "created"),
-        )
-    )
     return _OpenStackImageCandidate(
         image=OpenStackImage(id=image_id, name=row_name),
-        created_at=created_at,
+        created_at=_openstack_created_at_from_payload(row),
+        updated_at=_openstack_updated_at_from_payload(row),
+    )
+
+
+def _image_candidate_with_detail_payload(
+    candidate: _OpenStackImageCandidate,
+    payload: Mapping[str, object],
+) -> _OpenStackImageCandidate:
+    """Return an image candidate with timestamps from an image-show payload."""
+    return _OpenStackImageCandidate(
+        image=candidate.image,
+        created_at=candidate.created_at or _openstack_created_at_from_payload(payload),
+        updated_at=candidate.updated_at or _openstack_updated_at_from_payload(payload),
     )
 
 
 def _image_candidate_sort_key(
     candidate: _OpenStackImageCandidate,
-) -> tuple[datetime, str]:
+) -> tuple[datetime, datetime, str]:
     """Return a deterministic newest-image sort key."""
     minimum_datetime = datetime.min.replace(tzinfo=UTC)
-    return (candidate.created_at or minimum_datetime, candidate.image.id)
+    return (
+        _image_candidate_primary_timestamp(candidate) or minimum_datetime,
+        candidate.updated_at or minimum_datetime,
+        candidate.image.id,
+    )
+
+
+def _image_candidate_primary_timestamp(
+    candidate: _OpenStackImageCandidate,
+) -> datetime | None:
+    """Return the timestamp that best represents image recency."""
+    return candidate.created_at or candidate.updated_at
+
+
+def _openstack_created_at_from_payload(
+    payload: Mapping[str, object],
+) -> datetime | None:
+    """Return a parsed image creation timestamp from OpenStack JSON."""
+    return _parse_openstack_timestamp(
+        _optional_value_from_any(
+            payload,
+            ("Created At", "created_at", "createdAt", "created"),
+        )
+    )
+
+
+def _openstack_updated_at_from_payload(
+    payload: Mapping[str, object],
+) -> datetime | None:
+    """Return a parsed image update timestamp from OpenStack JSON."""
+    return _parse_openstack_timestamp(
+        _optional_value_from_any(
+            payload,
+            ("Updated At", "updated_at", "updatedAt", "updated"),
+        )
+    )
 
 
 def _parse_openstack_timestamp(value: object) -> datetime | None:
