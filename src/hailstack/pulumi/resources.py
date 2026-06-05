@@ -160,7 +160,7 @@ def create_cluster_resources(
         master_lustre_port = _create_port(
             _lustre_port_name(cluster_name, 0),
             lustre_network_id,
-            [master_security_group.id],
+            None,
             tags,
         )
         master_networks.append(InstanceNetworkArgs(port=master_lustre_port.id))
@@ -168,7 +168,7 @@ def create_cluster_resources(
             worker_lustre_port = _create_port(
                 _lustre_port_name(cluster_name, index),
                 lustre_network_id,
-                [worker_security_group.id],
+                None,
                 tags,
             )
             worker_network.append(InstanceNetworkArgs(port=worker_lustre_port.id))
@@ -362,10 +362,19 @@ def _create_internal_rule(
 def _create_port(
     name: str,
     network_id: pulumi.Input[str],
-    security_group_ids: Sequence[pulumi.Input[str]],
+    security_group_ids: Sequence[pulumi.Input[str]] | None,
     tags: Sequence[str],
 ) -> Port:
-    """Create an OpenStack Neutron port with the given security groups."""
+    """Create an OpenStack Neutron port with optional security-group attachment."""
+    if security_group_ids is None:
+        return Port(
+            name,
+            name=name,
+            network_id=network_id,
+            no_security_groups=True,
+            tags=list(tags),
+        )
+
     return Port(
         name,
         name=name,

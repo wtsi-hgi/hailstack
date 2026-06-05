@@ -729,6 +729,40 @@ def test_lustre_ports_use_numbered_name_pattern_for_master_and_workers(
     ]
 
 
+def test_lustre_ports_omit_security_groups_and_port_security_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create Lustre ports without security groups or port-security overrides."""
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "ssh_username": "ubuntu",
+            "floating_ip": "",
+        }
+    )
+
+    mocks, _, _ = _run_stack(config, monkeypatch)
+    ports = _resource_inputs(mocks, "openstack:networking/port:Port")
+    management_ports = [
+        port for port in ports if "lustre-port" not in str(port["name"])
+    ]
+    lustre_ports = [port for port in ports if "lustre-port" in str(port["name"])]
+
+    assert len(management_ports) == 4
+    assert all("security_group_ids" in port for port in management_ports)
+    assert all("no_security_groups" not in port for port in management_ports)
+    assert len(lustre_ports) == 4
+    assert all("security_group_ids" not in port for port in lustre_ports)
+    assert all(port.get("no_security_groups") is True for port in lustre_ports)
+    assert all("port_security_enabled" not in port for port in lustre_ports)
+
+
 def test_empty_floating_ip_allocates_new_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
