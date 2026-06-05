@@ -30,6 +30,8 @@ The two S3 credential pairs serve different purposes and usually point at differ
 
 They can be the same key if you want, but keeping them separate lets you rotate them independently and grant the cluster's data access more broadly than the CLI's state access.
 
+Hailstack automatically provides a stable Pulumi stack passphrase from the configured state-bucket credentials for normal `create`, `destroy`, and preview operations. Most users do not need to set `PULUMI_CONFIG_PASSPHRASE` or `PULUMI_CONFIG_PASSPHRASE_FILE`; those variables are only for sites that intentionally manage Pulumi secrets encryption themselves.
+
 ## Installation
 
 There is currently no published `hailstack.sif` artifact. Pick one of the two installation paths below.
@@ -520,6 +522,7 @@ Monitoring is controlled by `cluster.monitoring`.
 | `OpenStack CLI not found`                                                                  | The host environment lacks the `openstack` client.                                                                   | Use the packaged container entrypoint or install the expected OpenStack CLI in the environment that runs Hailstack.                         |
 | `Network '<name>' not found`, missing image, or missing floating IP errors during `create` | Pre-flight resource checks failed.                                                                                   | Verify `cluster.network_name`, `cluster.lustre_network`, the built image name `hailstack-<bundle-id>`, and any fixed `cluster.floating_ip`. |
 | Pulumi backend errors containing `XAmzContentSHA256Mismatch`                               | The Pulumi CLI version is incompatible with the documented Ceph S3 backend.                                           | Install or select Pulumi CLI `3.226.0`; the Apptainer image already pins this supported version.                                            |
+| Pulumi asks for `PULUMI_CONFIG_PASSPHRASE` during first-time `create`                      | Hailstack is not supplying its normal automatic Pulumi passphrase, or a custom Pulumi secrets setup is incomplete.    | Upgrade Hailstack and confirm the `ceph_s3` state-bucket credentials load from your config or `.env`; most users should not set Pulumi passphrase variables manually. |
 | `Timed out waiting for SSH connectivity to return` during `reboot`                         | The worker did not come back cleanly after reboot or SSH access is blocked.                                          | Check the instance console, confirm the security-group SSH setting, and verify the configured `cluster.ssh_username`.                       |
 | `Cluster not found` from `status`                                                          | The Pulumi stack for that cluster name does not exist in the configured Ceph backend.                                | Re-check `cluster.name`, Ceph S3 credentials, and whether the cluster was already destroyed.                                                |
 

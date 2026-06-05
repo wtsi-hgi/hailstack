@@ -44,6 +44,7 @@ class FakeAutoStack:
         self.preview_calls = 0
         self.preview_destroy_calls = 0
         self.destroy_calls = 0
+        self.up_calls = 0
         self.output_values: dict[str, object] = {}
 
     def preview(self, *, on_output: object) -> object:
@@ -62,6 +63,17 @@ class FakeAutoStack:
         """Record destroy requests from the runner."""
         assert remove is True
         self.destroy_calls += 1
+
+    def up(self, *, on_output: object) -> object:
+        """Return a fake create result with the required master IP output."""
+        del on_output
+        self.up_calls += 1
+        return SimpleNamespace(
+            stdout="created\n",
+            outputs={
+                "master_public_ip": SimpleNamespace(value="198.51.100.20"),
+            },
+        )
 
     def outputs(self) -> dict[str, object]:
         """Return fake stack outputs."""
@@ -108,6 +120,35 @@ def _capture_new_stack_preview_env(
         stack_exists=False,
     )
 
+    assert len(captured_envs) == 1
+    return captured_envs[0]
+
+
+def _capture_persisted_create_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    """Return the Pulumi env passed to a first-time persisted create."""
+    fake_stack = FakeAutoStack()
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_create_or_select_stack(**kwargs: object) -> FakeAutoStack:
+        workspace_options = cast(auto.LocalWorkspaceOptions, kwargs["opts"])
+        captured_envs.append(cast(dict[str, str], workspace_options.env_vars))
+        return fake_stack
+
+    monkeypatch.setattr(
+        stack_module.auto,
+        "create_or_select_stack",
+        fake_create_or_select_stack,
+    )
+
+    result = stack_module.AutomationStackRunner().up(
+        _config(),
+        cast(Bundle, SimpleNamespace(id="bundle-id")),
+    )
+
+    assert result.master_public_ip == "198.51.100.20"
+    assert fake_stack.up_calls == 1
     assert len(captured_envs) == 1
     return captured_envs[0]
 
@@ -196,7 +237,20 @@ def test_preview_new_stack_defaults_passphrase_for_ephemeral_backend(
 
     env = _capture_new_stack_preview_env(monkeypatch)
 
-    assert env["PULUMI_CONFIG_PASSPHRASE"]
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_persisted_create_defaults_passphrase_to_state_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create first-time persisted stacks without requiring manual Pulumi setup."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_persisted_create_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
     assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
 
 
@@ -442,18 +496,45 @@ def test_pulumi_env_preserves_explicit_pulumi_home(
     assert env["PULUMI_HOME"] == "/tmp/custom-pulumi-home"
 
 
-def test_pulumi_env_does_not_default_passphrase_for_persisted_stacks(
+def test_pulumi_env_defaults_passphrase_to_state_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep passphrase defaults scoped away from persisted stack operations."""
+    """Use the state secret as a stable default Pulumi passphrase."""
     monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
     monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
 
     runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
     env = runner._pulumi_env(_config())
 
-    assert "PULUMI_CONFIG_PASSPHRASE" not in env
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
     assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_pulumi_env_preserves_explicit_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrases for persisted stacks."""
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE", "caller-passphrase")
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == "caller-passphrase"
+
+
+def test_pulumi_env_preserves_explicit_passphrase_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrase files for persisted stacks."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE_FILE", "/tmp/caller-passphrase")
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["PULUMI_CONFIG_PASSPHRASE_FILE"] == "/tmp/caller-passphrase"
+    assert "PULUMI_CONFIG_PASSPHRASE" not in env
 
 
 def test_backend_access_normalizes_bare_ceph_endpoint_and_defaults_region(
