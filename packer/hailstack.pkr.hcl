@@ -94,6 +94,7 @@ build {
   sources = ["source.openstack.hailstack"]
 
   provisioner "shell" {
+    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E {{ .Path }}"
     scripts = [
       "${path.root}/scripts/base.sh",
       "${path.root}/scripts/ubuntu/packages.sh",

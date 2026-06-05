@@ -602,6 +602,19 @@ def _repo_template_script_entries() -> set[str]:
     return set(re.findall(r'"([^"]+)"', scripts_block.group("body")))
 
 
+def _repo_shell_provisioner_block() -> str:
+    """Return the checked-in shell provisioner body."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    provisioner_block = re.search(
+        r'provisioner\s+"shell"\s*\{(?P<body>.*?)\n\s*\}',
+        template,
+        re.S,
+    )
+    assert provisioner_block is not None
+
+    return provisioner_block["body"]
+
+
 def test_checked_in_openstack_builder_uses_config_drive() -> None:
     """Deliver Packer's temporary SSH key through Nova config drive metadata."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1937,6 +1950,23 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "GNOMAD_VERSION",
     ):
         assert f'"{env_name}=${{var.' in template
+
+
+def test_repo_packer_shell_provisioner_runs_as_root_and_preserves_env() -> None:
+    """Run provisioner scripts through passwordless sudo with bundle env vars."""
+    provisioner_body = _repo_shell_provisioner_block()
+    execute_command = re.search(
+        r'^\s*execute_command\s*=\s*"(?P<command>[^"]+)"\s*$',
+        provisioner_body,
+        re.M,
+    )
+    assert execute_command is not None
+
+    command = execute_command["command"]
+    assert "chmod +x {{ .Path }}" in command
+    assert "{{ .Vars }}" in command
+    assert "sudo -E {{ .Path }}" in command
+    assert command.index("{{ .Vars }}") < command.index("sudo -E")
 
 
 def test_repo_packer_template_roots_scripts_at_template_directory() -> None:
