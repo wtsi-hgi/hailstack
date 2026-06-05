@@ -28,6 +28,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Never
 
 import pytest
@@ -72,6 +73,14 @@ class VolumeQuota:
     """Represent fake available volume quota."""
 
     gigabytes_available: int = 1000
+
+
+@dataclass(frozen=True)
+class FakeImage:
+    """Represent a fake Glance image selected during pre-flight."""
+
+    id: str
+    name: str
 
 
 @dataclass
@@ -132,7 +141,7 @@ class FakeOpenStackClient:
 
     def get_image(self, name: str) -> object | None:
         """Return a truthy image record when the image exists."""
-        return {"name": name} if name in self.images else None
+        return FakeImage(id=f"{name}-id", name=name) if name in self.images else None
 
     def get_flavour(self, name: str) -> FlavorDetails | None:
         """Return flavour details when the flavour exists."""
@@ -211,6 +220,9 @@ class FakePulumiRunner:
         self.cleanup_failed_create_calls = 0
         self.preview_configs: list[object] = []
         self.up_configs: list[object] = []
+        self.preview_image_ids: list[str | None] = []
+        self.up_image_ids: list[str | None] = []
+        self.cleanup_image_ids: list[str | None] = []
 
     def check_backend_access(self, config: object) -> None:
         """Record backend validation and optionally fail."""
@@ -231,10 +243,12 @@ class FakePulumiRunner:
         bundle: object,
         *,
         stack_exists: bool | None = None,
+        image_id: str | None = None,
     ) -> str:
         """Return a preview-only Pulumi output string."""
         del bundle, stack_exists
         self.preview_configs.append(config)
+        self.preview_image_ids.append(image_id)
         self.preview_calls += 1
         return self.preview_output
 
@@ -248,19 +262,33 @@ class FakePulumiRunner:
         del config
         return dict(self.current_stack_outputs_value)
 
-    def up(self, config: object, bundle: object) -> FakeCreateResult:
+    def up(
+        self,
+        config: object,
+        bundle: object,
+        *,
+        image_id: str | None = None,
+    ) -> FakeCreateResult:
         """Return a fake create result or fail."""
         del bundle
         self.up_configs.append(config)
+        self.up_image_ids.append(image_id)
         self.up_calls += 1
         if self.up_error is not None:
             raise self.up_error
         return self.create_result
 
-    def cleanup_failed_create(self, config: object, bundle: object) -> None:
+    def cleanup_failed_create(
+        self,
+        config: object,
+        bundle: object,
+        *,
+        image_id: str | None = None,
+    ) -> None:
         """Record automatic cleanup calls after failed first-time creates."""
         del config, bundle
         self.cleanup_failed_create_calls += 1
+        self.cleanup_image_ids.append(image_id)
         if self.cleanup_error is not None:
             raise self.cleanup_error
 
@@ -302,6 +330,74 @@ def test_openstack_optional_show_raises_network_error_for_auth_failures(
 
     with pytest.raises(NetworkError, match="Authentication failed"):
         create_module.OpenStackCLIClient().get_network("private-net")
+
+
+def test_openstack_get_image_selects_newest_active_duplicate_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve duplicate active image names to the newest image ID."""
+    image_name = "hailstack-hail-0.2.137-gnomad-3.0.4-r2"
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, check, text
+        commands.append(command)
+        if command[:3] == ["openstack", "image", "show"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"More than one Image exists with the name '{image_name}'.",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                [
+                    {
+                        "ID": "e49f3d46-54e4-4ec2-9241-1c560bcaf5c3",
+                        "Name": image_name,
+                        "Status": "active",
+                        "Created At": "2026-06-05T08:00:00Z",
+                    },
+                    {
+                        "ID": "19d4a6df-7435-4734-991a-c1629506659e",
+                        "Name": image_name,
+                        "Status": "active",
+                        "Created At": "2026-06-05T10:00:00Z",
+                    },
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+
+    image = create_module.OpenStackCLIClient().get_image(image_name)
+
+    assert image is not None
+    assert getattr(image, "id", None) == "19d4a6df-7435-4734-991a-c1629506659e"
+    assert getattr(image, "name", None) == image_name
+    assert commands == [
+        [
+            "openstack",
+            "image",
+            "list",
+            "--name",
+            image_name,
+            "--status",
+            "active",
+            "--long",
+            "-f",
+            "json",
+        ]
+    ]
 
 
 def test_openstack_required_show_retries_transient_failures(
@@ -591,6 +687,32 @@ def test_create_apply_outputs_master_floating_ip(
         "Cluster 'test-cluster' created. Master IP: 198.51.100.20"
     )
     assert fake_runner.up_calls == 1
+
+
+def test_create_passes_resolved_image_id_to_pulumi(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create instances from the selected Glance image ID, not ambiguous name."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    selected_image_id = "19d4a6df-7435-4734-991a-c1629506659e"
+
+    class ImageIdOpenStackClient(FakeOpenStackClient):
+        def get_image(self, name: str) -> object | None:
+            """Return the newest active duplicate-name image."""
+            if super().get_image(name) is None:
+                return None
+            return SimpleNamespace(id=selected_image_id, name=name)
+
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, ImageIdOpenStackClient(), fake_runner)
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert fake_runner.up_image_ids == [selected_image_id]
 
 
 def test_create_passes_runner_default_public_key_to_pulumi(

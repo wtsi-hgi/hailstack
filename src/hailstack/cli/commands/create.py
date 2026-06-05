@@ -29,6 +29,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
 from typing import Annotated, Protocol, cast
@@ -97,6 +98,30 @@ class VolumeQuota:
     """Represent available volume quota for the current project."""
 
     gigabytes_available: int
+
+
+@dataclass(frozen=True)
+class OpenStackImage:
+    """Represent a resolved OpenStack image."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class PreflightValidationResult:
+    """Represent resolved values from successful create pre-flight checks."""
+
+    image_id: str
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _OpenStackImageCandidate:
+    """Represent one image-list row eligible for bundle image selection."""
+
+    image: OpenStackImage
+    created_at: datetime | None
 
 
 class OpenStackPreflightClient(Protocol):
@@ -172,16 +197,29 @@ class PulumiCreateRunner(Protocol):
         config: ClusterConfig,
         bundle: Bundle,
         *,
+        image_id: str | None = None,
         stack_exists: bool | None = None,
     ) -> str:
         """Return rendered preview output."""
         ...
 
-    def up(self, config: ClusterConfig, bundle: Bundle) -> object:
+    def up(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> object:
         """Apply infrastructure and return an object exposing master_public_ip."""
         ...
 
-    def cleanup_failed_create(self, config: ClusterConfig, bundle: Bundle) -> None:
+    def cleanup_failed_create(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> None:
         """Destroy infrastructure created by a failed first-time create."""
         ...
 
@@ -189,11 +227,23 @@ class PulumiCreateRunner(Protocol):
 class OpenStackCLIClient:
     """Query OpenStack resources through the CLI in a mockable wrapper."""
 
-    def get_image(self, name: str) -> object | None:
+    def get_image(self, name: str) -> OpenStackImage | None:
         """Return a truthy record when the image exists."""
-        return self._run_optional_show(
-            ["openstack", "image", "show", name, "-f", "json"]
+        rows = self._run_json_list(
+            [
+                "openstack",
+                "image",
+                "list",
+                "--name",
+                name,
+                "--status",
+                "active",
+                "--long",
+                "-f",
+                "json",
+            ]
         )
+        return _select_newest_active_image(name, rows)
 
     def get_flavour(self, name: str) -> FlavorDetails | None:
         """Return flavour details when the flavour exists."""
@@ -379,6 +429,32 @@ class OpenStackCLIClient:
         allow_not_found: bool,
     ) -> dict[str, object] | None:
         """Run an OpenStack command with retries for transient control-plane errors."""
+        payload = self._run_json(command, allow_not_found=allow_not_found)
+        if payload is None:
+            return None
+        return _json_payload_to_mapping(payload, "OpenStack CLI")
+
+    def _run_json_list(self, command: list[str]) -> list[dict[str, object]]:
+        """Run an OpenStack command that returns a JSON list."""
+        payload = self._run_json(command, allow_not_found=False)
+        if not isinstance(payload, list):
+            raise NetworkError("OpenStack CLI returned a non-list JSON payload")
+
+        rows: list[dict[str, object]] = []
+        for row in cast(list[object], payload):
+            if not isinstance(row, dict):
+                raise NetworkError("OpenStack CLI returned invalid list JSON rows")
+            raw_row = cast(dict[object, object], row)
+            rows.append({str(key): value for key, value in raw_row.items()})
+        return rows
+
+    def _run_json(
+        self,
+        command: list[str],
+        *,
+        allow_not_found: bool,
+    ) -> object | None:
+        """Run an OpenStack command with retries and return parsed JSON."""
         for attempt, backoff_seconds in enumerate((0.0, *_RETRY_BACKOFF_SECONDS)):
             if attempt > 0:
                 sleep(backoff_seconds)
@@ -393,7 +469,7 @@ class OpenStackCLIClient:
                 raise NetworkError("OpenStack CLI not found") from error
 
             if result.returncode == 0:
-                return _parse_json_mapping(result.stdout, "OpenStack CLI")
+                return _parse_json_payload(result.stdout, "OpenStack CLI")
 
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
             if _looks_like_transient_openstack_error(detail) and attempt < len(
@@ -441,6 +517,101 @@ def _looks_like_transient_openstack_error(detail: str) -> bool:
     return any(marker in lowered for marker in _TRANSIENT_OPENSTACK_ERROR_MARKERS)
 
 
+def _select_newest_active_image(
+    image_name: str,
+    rows: list[dict[str, object]],
+) -> OpenStackImage | None:
+    """Return the newest active image with the requested name."""
+    candidates = [
+        candidate
+        for row in rows
+        if (candidate := _image_candidate_from_row(row, image_name)) is not None
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=_image_candidate_sort_key).image
+
+
+def _image_candidate_from_row(
+    row: Mapping[str, object],
+    image_name: str,
+) -> _OpenStackImageCandidate | None:
+    """Convert an OpenStack image-list row into a selectable candidate."""
+    row_name = _optional_str_from_any(row, ("Name", "name"))
+    if row_name is None or row_name != image_name:
+        return None
+
+    status = _optional_str_from_any(row, ("Status", "status"))
+    if status is not None and status.lower() != "active":
+        return None
+
+    image_id = _optional_str_from_any(row, ("ID", "id"))
+    if image_id is None:
+        raise NetworkError("OpenStack image list response missing image ID")
+
+    created_at = _parse_openstack_timestamp(
+        _optional_value_from_any(
+            row,
+            ("Created At", "created_at", "createdAt", "created"),
+        )
+    )
+    return _OpenStackImageCandidate(
+        image=OpenStackImage(id=image_id, name=row_name),
+        created_at=created_at,
+    )
+
+
+def _image_candidate_sort_key(
+    candidate: _OpenStackImageCandidate,
+) -> tuple[datetime, str]:
+    """Return a deterministic newest-image sort key."""
+    minimum_datetime = datetime.min.replace(tzinfo=UTC)
+    return (candidate.created_at or minimum_datetime, candidate.image.id)
+
+
+def _parse_openstack_timestamp(value: object) -> datetime | None:
+    """Parse an OpenStack timestamp into UTC when possible."""
+    if not isinstance(value, str):
+        return None
+
+    timestamp = value.strip()
+    if not timestamp:
+        return None
+    if timestamp.endswith("Z"):
+        timestamp = f"{timestamp[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _optional_str_from_any(
+    payload: Mapping[str, object],
+    keys: tuple[str, ...],
+) -> str | None:
+    """Return the first non-blank string value for any of the given keys."""
+    value = _optional_value_from_any(payload, keys)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _optional_value_from_any(
+    payload: Mapping[str, object],
+    keys: tuple[str, ...],
+) -> object | None:
+    """Return the first value present for any of the given keys."""
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
+
+
 def get_create_logger() -> logging.Logger:
     """Return a dedicated stderr logger for create progress messages."""
     logger = logging.getLogger("hailstack.create")
@@ -486,14 +657,15 @@ def _run_preflight_validation(
     expected_attached_floating_ip: str | None = None,
     current_stack_outputs: Mapping[str, object] | None = None,
     skip_backend_dependent_checks: bool = False,
-) -> list[str]:
+) -> PreflightValidationResult:
     """Validate required resources and quotas before running Pulumi."""
     image_name = f"hailstack-{bundle.id}"
     missing_resources: list[str] = []
     quota_breaches: list[str] = []
     warnings: list[str] = []
 
-    if client.get_image(image_name) is None:
+    image = client.get_image(image_name)
+    if image is None:
         missing_resources.append(f"image '{image_name}'")
 
     flavour_specs = _resolved_flavour_specs(config, client, missing_resources)
@@ -622,7 +794,10 @@ def _run_preflight_validation(
                 quota_breaches.append(quota_message)
 
     if not missing_resources and not quota_breaches:
-        return warnings
+        return PreflightValidationResult(
+            image_id=_image_id_from_record(image, image_name),
+            warnings=warnings,
+        )
 
     if missing_resources == [f"image '{image_name}'"] and not quota_breaches:
         raise ImageNotFoundError(
@@ -638,6 +813,29 @@ def _run_preflight_validation(
     if missing_resources:
         raise ResourceNotFoundError(message)
     raise QuotaExceededError(message)
+
+
+def _image_id_from_record(image: object | None, image_name: str) -> str:
+    """Extract a required image ID from a pre-flight image record."""
+    if image is None:
+        raise ImageNotFoundError(
+            f"Image '{image_name}' not found. Run: hailstack build-image"
+        )
+
+    image_id: object | None
+    if isinstance(image, Mapping):
+        image_id = _optional_value_from_any(
+            cast(Mapping[str, object], image),
+            ("id", "ID"),
+        )
+    else:
+        image_id = getattr(image, "id", None)
+
+    if isinstance(image_id, str) and image_id.strip():
+        return image_id.strip()
+    raise NetworkError(
+        f"OpenStack image lookup for '{image_name}' did not return an image ID"
+    )
 
 
 def _resolved_flavour_specs(
@@ -672,13 +870,16 @@ def _optional_output_int(outputs: Mapping[str, object], key: str) -> int | None:
     return None
 
 
-def _parse_json_mapping(raw_json: str, source: str) -> dict[str, object]:
-    """Parse a JSON object or OpenStack name/value rows into a typed mapping."""
+def _parse_json_payload(raw_json: str, source: str) -> object:
+    """Parse a JSON payload from a command source."""
     try:
-        payload = cast(object, json.loads(raw_json))
+        return cast(object, json.loads(raw_json))
     except json.JSONDecodeError as error:
         raise NetworkError(f"{source} returned invalid JSON") from error
 
+
+def _json_payload_to_mapping(payload: object, source: str) -> dict[str, object]:
+    """Convert a parsed JSON object or name/value rows into a mapping."""
     if isinstance(payload, list):
         return _parse_json_name_value_rows(cast(list[object], payload), source)
 
@@ -839,7 +1040,7 @@ def create_command(
         else None
     )
 
-    _run_preflight_validation(
+    preflight_result = _run_preflight_validation(
         loaded_config,
         resolved_bundle,
         create_openstack_preflight_client(),
@@ -856,6 +1057,7 @@ def create_command(
         preview_output = pulumi_runner.preview(
             loaded_config,
             resolved_bundle,
+            image_id=preflight_result.image_id,
             stack_exists=stack_already_exists,
         )
         typer.echo(preview_output, nl=not preview_output.endswith("\n"))
@@ -863,11 +1065,19 @@ def create_command(
 
     logger.info("creating infrastructure")
     try:
-        result = pulumi_runner.up(loaded_config, resolved_bundle)
+        result = pulumi_runner.up(
+            loaded_config,
+            resolved_bundle,
+            image_id=preflight_result.image_id,
+        )
     except PulumiError as error:
         if not stack_already_exists:
             try:
-                pulumi_runner.cleanup_failed_create(loaded_config, resolved_bundle)
+                pulumi_runner.cleanup_failed_create(
+                    loaded_config,
+                    resolved_bundle,
+                    image_id=preflight_result.image_id,
+                )
             except PulumiError as cleanup_error:
                 raise PulumiError(
                     f"{error}; cleanup after failed create also failed: {cleanup_error}"

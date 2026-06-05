@@ -133,7 +133,7 @@ class FakeOpenStackClient:
 
     def get_image(self, name: str) -> object | None:
         """Return a truthy image record when the image exists."""
-        return {"name": name} if name in self.images else None
+        return {"id": f"{name}-id", "name": name} if name in self.images else None
 
     def get_flavour(self, name: str) -> FlavorDetails | None:
         """Return flavour details when the flavour exists."""

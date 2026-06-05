@@ -67,6 +67,7 @@ def create_cluster_resources(
     config: ClusterConfig,
     bundle: Bundle,
     *,
+    image_id: str | None = None,
     retain_created_volume: bool | None = None,
     allow_missing_runtime_secrets: bool = False,
     allow_missing_ssh_public_keys: bool = False,
@@ -194,12 +195,17 @@ def create_cluster_resources(
         tags,
         retain_created_volume=retain_created_volume,
     )
+    instance_image_id = _normalized_image_id(image_id)
+    instance_image_name = (
+        None if instance_image_id is not None else f"hailstack-{bundle.id}"
+    )
 
     master_instance = Instance(
         master_name,
         name=master_name,
         flavor_name=config.cluster.master_flavour,
-        image_name=f"hailstack-{bundle.id}",
+        image_id=instance_image_id,
+        image_name=instance_image_name,
         key_pair=keypair.name,
         config_drive=True,
         networks=master_networks,
@@ -231,7 +237,8 @@ def create_cluster_resources(
             worker_name,
             name=worker_name,
             flavor_name=config.cluster.worker_flavour,
-            image_name=f"hailstack-{bundle.id}",
+            image_id=instance_image_id,
+            image_name=instance_image_name,
             key_pair=keypair.name,
             config_drive=True,
             networks=worker_network,
@@ -477,6 +484,14 @@ def _netdata_api_key(config: ClusterConfig) -> str | None:
     if config.cluster.monitoring != "netdata":
         return None
     return str(uuid4())
+
+
+def _normalized_image_id(image_id: str | None) -> str | None:
+    """Return a non-blank image ID when create preflight resolved one."""
+    if image_id is None:
+        return None
+    normalized = image_id.strip()
+    return normalized or None
 
 
 def _render_master_cloud_init(

@@ -99,6 +99,7 @@ class AutomationStackRunner:
         config: ClusterConfig,
         bundle: Bundle,
         *,
+        image_id: str | None = None,
         stack_exists: bool | None = None,
     ) -> str:
         """Run a Pulumi preview and return the rendered plan output."""
@@ -110,6 +111,7 @@ class AutomationStackRunner:
                 config,
                 bundle,
                 create_if_missing=False,
+                image_id=image_id,
             )
             output_lines: list[str] = []
             try:
@@ -119,7 +121,7 @@ class AutomationStackRunner:
 
             return result.stdout or "".join(output_lines)
 
-        return self._preview_new_stack(config, bundle)
+        return self._preview_new_stack(config, bundle, image_id=image_id)
 
     def stack_exists(self, config: ClusterConfig) -> bool:
         """Return whether the configured Pulumi stack already exists."""
@@ -131,13 +133,20 @@ class AutomationStackRunner:
             raise
         return True
 
-    def _preview_new_stack(self, config: ClusterConfig, bundle: Bundle) -> str:
+    def _preview_new_stack(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> str:
         """Preview a first-time create against an ephemeral local backend."""
 
         def pulumi_program() -> None:
             create_cluster_resources(
                 config,
                 bundle,
+                image_id=image_id,
                 allow_missing_runtime_secrets=True,
             )
 
@@ -190,9 +199,20 @@ class AutomationStackRunner:
         stack = self._get_stack(config, None, create_if_missing=False)
         return {name: output.value for name, output in stack.outputs().items()}
 
-    def up(self, config: ClusterConfig, bundle: Bundle) -> CreateResult:
+    def up(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> CreateResult:
         """Apply the Pulumi stack and return the master floating IP output."""
-        stack = self._get_stack(config, bundle, create_if_missing=True)
+        stack = self._get_stack(
+            config,
+            bundle,
+            create_if_missing=True,
+            image_id=image_id,
+        )
         output_lines: list[str] = []
         try:
             result = stack.up(on_output=output_lines.append)
@@ -217,9 +237,20 @@ class AutomationStackRunner:
             retain_created_volume=retain_created_volume,
         )
 
-    def cleanup_failed_create(self, config: ClusterConfig, bundle: Bundle) -> None:
+    def cleanup_failed_create(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> None:
         """Destroy a failed first-time create without retaining created volumes."""
-        self._destroy_stack(config, bundle, retain_created_volume=False)
+        self._destroy_stack(
+            config,
+            bundle,
+            retain_created_volume=False,
+            image_id=image_id,
+        )
 
     def _destroy_stack(
         self,
@@ -227,6 +258,7 @@ class AutomationStackRunner:
         bundle: Bundle | None,
         *,
         retain_created_volume: bool | None = None,
+        image_id: str | None = None,
     ) -> None:
         """Destroy the Pulumi stack with optional cleanup-specific ownership."""
         stack = self._get_stack(
@@ -235,6 +267,7 @@ class AutomationStackRunner:
             create_if_missing=False,
             retain_created_volume=retain_created_volume,
             allow_missing_runtime_secrets=True,
+            image_id=image_id,
         )
         try:
             stack.destroy(remove=True)
@@ -267,6 +300,7 @@ class AutomationStackRunner:
         create_if_missing: bool,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
+        image_id: str | None = None,
     ) -> auto.Stack:
         """Select the cluster stack and optionally create it when missing."""
 
@@ -275,6 +309,7 @@ class AutomationStackRunner:
                 create_cluster_resources(
                     config,
                     bundle,
+                    image_id=image_id,
                     retain_created_volume=retain_created_volume,
                     allow_missing_runtime_secrets=allow_missing_runtime_secrets,
                     allow_missing_ssh_public_keys=allow_missing_runtime_secrets,

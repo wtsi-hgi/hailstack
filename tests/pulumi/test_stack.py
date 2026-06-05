@@ -197,10 +197,11 @@ def test_preview_new_stack_allows_missing_runtime_secrets(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
     ) -> None:
-        del config, bundle, retain_created_volume
+        del config, bundle, image_id, retain_created_volume
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
 
     def fake_create_stack(**kwargs: object) -> FakeAutoStack:
@@ -308,11 +309,12 @@ def test_cleanup_failed_create_disables_volume_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
@@ -358,11 +360,12 @@ def test_destroy_uses_current_config_for_volume_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
@@ -419,11 +422,12 @@ def test_destroy_rehydrates_program_for_existing_floating_ip_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)

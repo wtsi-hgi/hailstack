@@ -180,6 +180,8 @@ def _config(**overrides: object) -> ClusterConfig:
 def _run_stack(
     config: ClusterConfig,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    image_id: str | None = None,
 ) -> tuple[RecordingMocks, dict[str, object], dict[str, object]]:
     """Run the Pulumi program under mocks and resolve returned outputs."""
     monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
@@ -202,7 +204,11 @@ def _run_stack(
             _export,
         )
 
-        outputs = create_cluster_resources(config, _bundle())
+        outputs = (
+            create_cluster_resources(config, _bundle())
+            if image_id is None
+            else create_cluster_resources(config, _bundle(), image_id=image_id)
+        )
 
         resolved_outputs = {
             name: _resolve_output(loop, output) for name, output in outputs.items()
@@ -338,6 +344,20 @@ def test_cluster_instances_enable_config_drive(
 
     assert len(instances) == 4
     assert all(instance["config_drive"] is True for instance in instances)
+
+
+def test_instances_use_resolved_image_id_when_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use a resolved Glance image ID so duplicate image names cannot matter."""
+    image_id = "19d4a6df-7435-4734-991a-c1629506659e"
+
+    mocks, _, _ = _run_stack(_config(), monkeypatch, image_id=image_id)
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+
+    assert len(instances) == 4
+    assert all(instance["image_id"] == image_id for instance in instances)
+    assert all("image_name" not in instance for instance in instances)
 
 
 def test_master_ssh_toggle_creates_tcp_22_rule(monkeypatch: pytest.MonkeyPatch) -> None:
