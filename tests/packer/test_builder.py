@@ -2077,9 +2077,9 @@ def test_repo_packer_scripts_are_executable_and_embed_version_checks() -> None:
             "nfs-kernel-server",
         ],
         "ubuntu/packages.sh": [
-            '"${PYTHON_BIN}" --version 2>&1 | grep -F "$PYTHON_VERSION"',
-            'grep -F "$JAVA_VERSION"',
-            'grep -F "$SCALA_VERSION"',
+            'hailstack_verify_version Java "$JAVA_VERSION"',
+            'hailstack_verify_version Python "$PYTHON_VERSION"',
+            'hailstack_verify_version Scala "$SCALA_VERSION"',
         ],
         "ubuntu/hadoop.sh": [
             'grep -F "$HADOOP_VERSION"',

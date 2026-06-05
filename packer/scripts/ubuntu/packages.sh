@@ -13,10 +13,32 @@ fi
 source "${HAILSTACK_PACKER_APT_HELPER}"
 
 PYTHON_BIN="python${PYTHON_VERSION}"
+SCALA_DEB_PATH="${TMPDIR:-/tmp}/scala-${SCALA_VERSION}.deb"
+
+hailstack_verify_version() {
+	local name="$1"
+	local expected="$2"
+	shift 2
+	local output
+
+	if ! output="$("$@" 2>&1)"; then
+		printf '[hailstack] %s version command failed: %s\n%s\n' "${name}" "$*" "${output}" >&2
+		return 1
+	fi
+
+	if ! grep -F "${expected}" <<<"${output}"; then
+		printf '[hailstack] expected %s version containing %s, got:\n%s\n' "${name}" "${expected}" "${output}" >&2
+		return 1
+	fi
+}
 
 hailstack_apt_get update
-hailstack_apt_get install -y openjdk-${JAVA_VERSION}-jdk scala "${PYTHON_BIN}" python3-pip
+hailstack_apt_get install -y openjdk-${JAVA_VERSION}-jdk "${PYTHON_BIN}" python3-pip
 
-java -version 2>&1 | grep -F "$JAVA_VERSION"
-"${PYTHON_BIN}" --version 2>&1 | grep -F "$PYTHON_VERSION"
-scala -version 2>&1 | grep -F "$SCALA_VERSION"
+curl -fsSL "https://downloads.lightbend.com/scala/${SCALA_VERSION}/scala-${SCALA_VERSION}.deb" -o "${SCALA_DEB_PATH}"
+hailstack_apt_get install -y "${SCALA_DEB_PATH}"
+rm -f "${SCALA_DEB_PATH}"
+
+hailstack_verify_version Java "$JAVA_VERSION" java -version
+hailstack_verify_version Python "$PYTHON_VERSION" "${PYTHON_BIN}" --version
+hailstack_verify_version Scala "$SCALA_VERSION" scala -version

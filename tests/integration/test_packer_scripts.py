@@ -31,8 +31,12 @@ from typing import Final
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "base.sh"
+PACKAGES_SCRIPT_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu" / "packages.sh"
 UBUNTU_SCRIPTS_PATH = REPOSITORY_ROOT / "packer" / "scripts" / "ubuntu"
-VERSION_CHECK_PATTERN = re.compile(r'grep -F "\$\{?[A-Z0-9_]+_VERSION\}?"')
+VERSION_CHECK_PATTERN = re.compile(
+    r'(grep -F "\$\{?[A-Z0-9_]+_VERSION\}?"|'
+    r"hailstack_verify_version .*\$\{?[A-Z0-9_]+_VERSION\}?)"
+)
 MOCK_VERSION_ENV: Final[dict[str, str]] = {
     "GNOMAD_VERSION": "3.0.4",
     "HADOOP_VERSION": "3.4.1",
@@ -64,6 +68,14 @@ def _write_stub_command(path: Path, body: str) -> None:
     """Create an executable command stub used by the hermetic base.sh test."""
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _stub_environment(tmp_path: Path) -> tuple[Path, Path]:
+    """Return a temporary bin directory and command log for script stubs."""
+    bin_dir = tmp_path / "bin"
+    command_log = tmp_path / "commands.log"
+    bin_dir.mkdir()
+    return bin_dir, command_log
 
 
 def _python_stub_body() -> str:
@@ -145,14 +157,13 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
 ) -> None:
     """Run a hermetic temp copy of base.sh with mocked version vars and tools."""
     temp_root = tmp_path / "root"
-    bin_dir = tmp_path / "bin"
+    bin_dir, _command_log = _stub_environment(tmp_path)
     (temp_root / "etc" / "systemd" / "system").mkdir(parents=True)
     (temp_root / "lib" / "systemd" / "system").mkdir(parents=True)
     (temp_root / "lib" / "systemd" / "system" / "nginx.service").write_text(
         "[Unit]\nDescription=nginx\n",
         encoding="utf-8",
     )
-    bin_dir.mkdir()
 
     _write_stub_command(
         bin_dir / "apt-get",
@@ -218,3 +229,119 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_o2_packages_script_installs_configured_scala_version(
+    tmp_path: Path,
+) -> None:
+    """Install the configured Scala deb instead of Ubuntu's generic scala package."""
+    bin_dir, command_log = _stub_environment(tmp_path)
+    scala_state = tmp_path / "scala-version.txt"
+
+    _write_stub_command(
+        bin_dir / "apt-get",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "apt-get %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'for arg in "$@"; do\n'
+        '  if [[ "$arg" == "scala" ]]; then\n'
+        '    printf "generic Ubuntu scala package was requested\\n" >&2\n'
+        "    exit 42\n"
+        "  fi\n"
+        '  if [[ "$arg" == */scala-"${SCALA_VERSION}".deb ]]; then\n'
+        '    printf "%s\\n" "${SCALA_VERSION}" >"${HAILSTACK_SCALA_STATE}"\n'
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+    )
+    _write_stub_command(
+        bin_dir / "curl",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'expected="https://downloads.lightbend.com/scala/${SCALA_VERSION}/scala-${SCALA_VERSION}.deb"\n'
+        'output_path=""\n'
+        'url=""\n'
+        "while (($# > 0)); do\n"
+        '  if [[ "$1" == "-o" ]]; then\n'
+        "    output_path=$2\n"
+        "    shift 2\n"
+        "    continue\n"
+        "  fi\n"
+        '  if [[ "$1" == http* ]]; then\n'
+        "    url=$1\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        'printf "curl %s -> %s\\n" "$url" "$output_path" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        '[[ "$url" == "$expected" ]]\n'
+        '[[ -n "$output_path" ]]\n'
+        'printf "scala deb\\n" >"$output_path"\n',
+    )
+    _write_stub_command(
+        bin_dir / "java",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "-version" ]]; then\n'
+        '  printf "openjdk version \\"11.0.31\\"\\n" >&2\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "python3.12",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
+        '  printf "Python 3.12.13\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "scala",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'version="2.11.12"\n'
+        'if [[ -r "${HAILSTACK_SCALA_STATE}" ]]; then\n'
+        '  version="$(cat "${HAILSTACK_SCALA_STATE}")"\n'
+        "fi\n"
+        'printf "Scala code runner version %s -- Lightbend\\n" "$version" >&2\n',
+    )
+    _write_stub_command(
+        bin_dir / "fuser",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    )
+    _write_stub_command(
+        bin_dir / "systemctl",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    )
+
+    env = dict(os.environ)
+    env.update(MOCK_VERSION_ENV)
+    env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+    env["HAILSTACK_PACKER_APT_HELPER"] = str(
+        REPOSITORY_ROOT / "packer" / "scripts" / "apt-locks.sh"
+    )
+    env["HAILSTACK_SCALA_STATE"] = str(scala_state)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["TMPDIR"] = str(tmp_path)
+
+    result = subprocess.run(
+        ["bash", str(PACKAGES_SCRIPT_PATH)],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+    install_lines = [line for line in commands if " install " in line]
+
+    assert any(
+        "https://downloads.lightbend.com/scala/2.12.18/scala-2.12.18.deb" in line
+        for line in commands
+    )
+    assert any("scala-2.12.18.deb" in line for line in install_lines)
+    assert not any(re.search(r"(^| )scala( |$)", line) for line in install_lines)
