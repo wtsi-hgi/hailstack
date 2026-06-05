@@ -95,11 +95,20 @@ def _here_doc(target_path: str, marker: str, content: str) -> list[str]:
     return [f"cat <<'{marker}' > {target_path}", content.rstrip(), marker]
 
 
-def _hosts_content(config: ClusterConfig, worker_ips: Sequence[str]) -> str:
+def _hosts_content(
+    config: ClusterConfig,
+    worker_ips: Sequence[str],
+    master_private_ip: str | None = None,
+) -> str:
     """Render the /etc/hosts payload for the master node."""
+    master_alias_ip = (
+        master_private_ip.strip() if master_private_ip is not None else "127.0.1.1"
+    )
+    if not master_alias_ip:
+        master_alias_ip = "127.0.1.1"
     host_lines = [
         "127.0.0.1 localhost",
-        f"127.0.1.1 master {config.cluster.name}-master",
+        f"{master_alias_ip} master {config.cluster.name}-master",
     ]
     for index, worker_ip in enumerate(worker_ips, start=1):
         host_lines.append(
@@ -755,6 +764,7 @@ def generate_master_cloud_init(
     worker_ips: list[str],
     netdata_api_key: str | None = None,
     *,
+    master_private_ip: str | None = None,
     attached_volume_id: str | None = None,
     allow_missing_runtime_secrets: bool = False,
 ) -> str:
@@ -784,7 +794,11 @@ def generate_master_cloud_init(
         f"# Hailstack bundle {bundle.id}",
         _master_install_directories(config),
         f"install -d -m 0700 /home/{username}/.ssh",
-        *_here_doc("/etc/hosts", "EOF_HOSTS", _hosts_content(config, worker_ips)),
+        *_here_doc(
+            "/etc/hosts",
+            "EOF_HOSTS",
+            _hosts_content(config, worker_ips, master_private_ip),
+        ),
         *_here_doc(
             f"/home/{username}/.ssh/authorized_keys",
             "EOF_AUTH_KEYS",

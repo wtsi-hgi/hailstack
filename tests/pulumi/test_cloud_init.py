@@ -377,6 +377,23 @@ def test_hosts_block_contains_master_and_all_workers(
     assert "10.0.0.13 worker-03 test-cluster-worker-03" in result
 
 
+def test_master_hosts_block_uses_supplied_master_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map the master alias to its private IP when the renderer receives it."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+        master_private_ip=_master_ip(),
+    )
+
+    assert "10.0.0.10 master test-cluster-master" in result
+    assert "127.0.1.1 master test-cluster-master" not in result
+
+
 def test_nginx_config_contains_all_required_proxy_locations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

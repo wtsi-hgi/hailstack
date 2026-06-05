@@ -1066,6 +1066,22 @@ def test_monitoring_netdata_create_flow_shares_one_api_key_across_all_nodes(
     assert worker_api_keys == {_extract_netdata_api_key(master_user_data)}
 
 
+def test_master_create_flow_writes_master_private_ip_host_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render the master alias to the master private IP in create user-data."""
+    mocks, _, _ = _run_stack(_config(), monkeypatch)
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+    user_data_by_name = {
+        str(instance["name"]): str(instance["user_data"]) for instance in instances
+    }
+
+    master_user_data = user_data_by_name["test-cluster-master"]
+
+    assert "10.0.0.10 master test-cluster-master" in master_user_data
+    assert "127.0.1.1 master test-cluster-master" not in master_user_data
+
+
 def test_master_cloud_init_targets_attached_volume_id_in_create_flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

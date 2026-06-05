@@ -212,6 +212,7 @@ def create_cluster_resources(
         tags=tags,
         metadata=_instance_metadata(cluster_name, bundle.id, "master"),
         user_data=pulumi.Output.all(
+            master_private_ip,
             worker_private_ips,
             pulumi.Output.from_input(attached_volume_id),
         ).apply(
@@ -219,8 +220,9 @@ def create_cluster_resources(
                 config,
                 bundle,
                 resolved_inputs[0],
+                resolved_inputs[1],
                 shared_netdata_api_key,
-                attached_volume_id=_resolved_attached_volume_id(resolved_inputs[1]),
+                attached_volume_id=_resolved_attached_volume_id(resolved_inputs[2]),
                 allow_missing_runtime_secrets=allow_missing_runtime_secrets,
             )
         ),
@@ -497,6 +499,7 @@ def _normalized_image_id(image_id: str | None) -> str | None:
 def _render_master_cloud_init(
     config: ClusterConfig,
     bundle: Bundle,
+    master_private_ip: object,
     worker_ips: Sequence[object],
     netdata_api_key: str | None,
     *,
@@ -504,11 +507,14 @@ def _render_master_cloud_init(
     allow_missing_runtime_secrets: bool = False,
 ) -> str:
     """Render master user-data from resolved cluster IP addresses."""
+    if not isinstance(master_private_ip, str):
+        raise PulumiError("Expected resolved master fixed IP value to be a string")
     return generate_master_cloud_init(
         config,
         bundle,
         _resolved_ip_list(worker_ips),
         netdata_api_key=netdata_api_key,
+        master_private_ip=master_private_ip,
         attached_volume_id=attached_volume_id,
         allow_missing_runtime_secrets=allow_missing_runtime_secrets,
     )
