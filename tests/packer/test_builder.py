@@ -53,6 +53,8 @@ NETWORK_UUID = "11111111-2222-3333-4444-555555555555"
 LUSTRE_NETWORK_UUID = "33333333-4444-5555-6666-777777777777"
 RESOLVED_NETWORK_UUID = "22222222-3333-4444-5555-666666666666"
 RESOLVED_LUSTRE_NETWORK_UUID = "44444444-5555-6666-7777-888888888888"
+MANAGEMENT_PORT_UUID = "55555555-6666-7777-8888-999999999999"
+LUSTRE_PORT_UUID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 
 
 def _write_config(
@@ -145,6 +147,67 @@ class _RecordingSecurityGroupManager:
     def cleanup(self, security_group_name: str) -> None:
         """Delete a fake temporary security group."""
         self.events.append(f"cleanup:{security_group_name}")
+
+
+class _SharedRecordingSecurityGroupManager:
+    """Record security-group lifecycle calls into a shared event list."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.name = "hailstack-packer-ssh-test"
+
+    def create(self) -> str:
+        """Create a fake temporary security group."""
+        self.events.append("sg:create")
+        return self.name
+
+    def cleanup(self, security_group_name: str) -> None:
+        """Delete a fake temporary security group."""
+        self.events.append(f"sg:cleanup:{security_group_name}")
+
+
+class _RecordingPortManager:
+    """Record temporary Packer port lifecycle calls for builder tests."""
+
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        fail_create: str = "",
+    ) -> None:
+        self.events = events
+        self.fail_create = fail_create
+
+    def create_management_port(
+        self,
+        *,
+        network_id: str,
+        security_group_name: str,
+    ) -> str:
+        """Create a fake management port with SSH security groups."""
+        if self.fail_create == "management":
+            raise PackerError(
+                "Could not create temporary Packer management port before "
+                "launching Packer. Check OpenStack port/security group "
+                "quota/permissions and credentials."
+            )
+        self.events.append(f"port:create-management:{network_id}:{security_group_name}")
+        return MANAGEMENT_PORT_UUID
+
+    def create_lustre_port(self, *, network_id: str) -> str:
+        """Create a fake Lustre port without security groups."""
+        if self.fail_create == "lustre":
+            raise PackerError(
+                "Could not create temporary Packer Lustre port before "
+                "launching Packer. Check OpenStack port/security group "
+                "quota/permissions and credentials."
+            )
+        self.events.append(f"port:create-lustre:{network_id}")
+        return LUSTRE_PORT_UUID
+
+    def cleanup(self, port_id: str) -> None:
+        """Delete a fake temporary port."""
+        self.events.append(f"port:cleanup:{port_id}")
 
 
 def test_default_packer_runner_stops_on_ssh_no_route_debug_log(
@@ -573,8 +636,8 @@ def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> No
     )
 
 
-def test_checked_in_openstack_builder_attaches_temporary_ssh_security_group() -> None:
-    """Attach default plus temporary SSH-open security group when configured."""
+def test_checked_in_openstack_builder_uses_ports_without_serverwide_sg() -> None:
+    """Switch to explicit ports without server-wide security groups."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
     source_block = re.search(
         r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
@@ -583,9 +646,14 @@ def test_checked_in_openstack_builder_attaches_temporary_ssh_security_group() ->
     )
     assert source_block is not None
 
-    assert 'variable "ssh_security_group"' in template
-    assert 'var.ssh_security_group == ""' in template
-    assert '["default", var.ssh_security_group]' in template
+    assert 'variable "ports"' in template
+    assert 'var.ports == "" ? null : split(",", var.ports)' in template
+    assert 'var.ports == "" ? ["default"] : null' in template
+    assert re.search(
+        r"^\s*ports\s*=\s*local\.packer_ports\s*$",
+        source_block["body"],
+        re.M,
+    )
     assert re.search(
         r"^\s*security_groups\s*=\s*local\.packer_security_groups\s*$",
         source_block["body"],
@@ -622,7 +690,7 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert f"network={NETWORK_UUID}" in command
     assert "lustre_network=" in command
     assert "floating_ip_pool=" in command
-    assert "ssh_security_group=" in command
+    assert "ports=" in command
     assert not any(argument.startswith("image_name=") for argument in command)
 
 
@@ -639,6 +707,7 @@ def test_build_image_reuses_cluster_floating_ip_pool_for_packer_when_unset(
     )
     template_path = _write_template_assets(tmp_path)
     security_groups = _RecordingSecurityGroupManager()
+    ports = _RecordingPortManager([])
     recorded_commands: list[list[str]] = []
 
     def fake_runner(
@@ -655,10 +724,11 @@ def test_build_image_reuses_cluster_floating_ip_pool_for_packer_when_unset(
         runner=fake_runner,
         template_path=template_path,
         security_group_manager=security_groups,
+        port_manager=ports,
     )
 
     assert "floating_ip_pool=public" in recorded_commands[0]
-    assert "ssh_security_group=hailstack-packer-ssh-test" in recorded_commands[0]
+    assert f"ports={MANAGEMENT_PORT_UUID}" in recorded_commands[0]
     assert security_groups.events == [
         "create",
         "cleanup:hailstack-packer-ssh-test",
@@ -678,6 +748,7 @@ def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
     )
     template_path = _write_template_assets(tmp_path)
     security_groups = _RecordingSecurityGroupManager()
+    ports = _RecordingPortManager([])
     recorded_commands: list[list[str]] = []
 
     def fake_runner(
@@ -694,19 +765,237 @@ def test_build_image_packer_floating_ip_pool_overrides_cluster_pool(
         runner=fake_runner,
         template_path=template_path,
         security_group_manager=security_groups,
+        port_manager=ports,
     )
 
     command = recorded_commands[0]
     assert "floating_ip_pool=build-public" in command
     assert "floating_ip_pool=cluster-public" not in command
-    assert "ssh_security_group=hailstack-packer-ssh-test" in command
+    assert f"ports={MANAGEMENT_PORT_UUID}" in command
 
 
-def test_build_image_creates_temporary_ssh_security_group_for_floating_ip_build(
+def test_build_image_uses_temporary_ports_for_floating_ip_build(
+    tmp_path: Path,
+) -> None:
+    """Apply SSH ingress only to the management port for floating IP builds."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            network_name="cloudforms_network",
+            lustre_network="lustre-hgi01",
+            cluster_floating_ip_pool="public",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    events: list[str] = []
+    security_groups = _SharedRecordingSecurityGroupManager(events)
+    ports = _RecordingPortManager(events)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        events.append("runner")
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    def fake_network_resolver(network_name: str) -> str:
+        return {
+            "cloudforms_network": RESOLVED_NETWORK_UUID,
+            "lustre-hgi01": RESOLVED_LUSTRE_NETWORK_UUID,
+        }[network_name]
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        network_resolver=fake_network_resolver,
+        security_group_manager=security_groups,
+        port_manager=ports,
+    )
+
+    assert events == [
+        "sg:create",
+        f"port:create-management:{RESOLVED_NETWORK_UUID}:hailstack-packer-ssh-test",
+        f"port:create-lustre:{RESOLVED_LUSTRE_NETWORK_UUID}",
+        "runner",
+        f"port:cleanup:{LUSTRE_PORT_UUID}",
+        f"port:cleanup:{MANAGEMENT_PORT_UUID}",
+        "sg:cleanup:hailstack-packer-ssh-test",
+    ]
+    command = recorded_commands[0]
+    assert "floating_ip_pool=public" in command
+    assert f"ports={MANAGEMENT_PORT_UUID},{LUSTRE_PORT_UUID}" in command
+    assert "ssh_security_group=hailstack-packer-ssh-test" not in command
+
+
+@pytest.mark.parametrize(
+    ("fail_create", "expected_events"),
+    [
+        pytest.param(
+            "management",
+            [
+                "sg:create",
+                "sg:cleanup:hailstack-packer-ssh-test",
+            ],
+            id="management",
+        ),
+        pytest.param(
+            "lustre",
+            [
+                "sg:create",
+                f"port:create-management:{NETWORK_UUID}:hailstack-packer-ssh-test",
+                f"port:cleanup:{MANAGEMENT_PORT_UUID}",
+                "sg:cleanup:hailstack-packer-ssh-test",
+            ],
+            id="lustre",
+        ),
+    ],
+)
+def test_build_image_cleans_up_before_runner_when_temporary_port_creation_fails(
+    tmp_path: Path,
+    fail_create: str,
+    expected_events: list[str],
+) -> None:
+    """Clean up partial floating-IP setup when temporary port creation fails."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            lustre_network=LUSTRE_NETWORK_UUID,
+            packer_floating_ip_pool="public",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    events: list[str] = []
+    security_groups = _SharedRecordingSecurityGroupManager(events)
+    ports = _RecordingPortManager(events, fail_create=fail_create)
+    runner_called = False
+
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("runner should not be called")
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fail_runner,
+            template_path=template_path,
+            security_group_manager=security_groups,
+            port_manager=ports,
+        )
+
+    assert not runner_called
+    assert "OpenStack port/security group quota/permissions" in str(raised.value)
+    assert events == expected_events
+
+
+def test_openstack_build_port_manager_creates_ports_with_expected_security(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create management and Lustre ports with interface-specific security."""
+    openstack_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        packer_builder,
+        "uuid4",
+        lambda: UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+    )
+
+    def fake_openstack(
+        command: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output
+        assert text
+        assert not check
+        openstack_commands.append(command)
+        port_id = (
+            MANAGEMENT_PORT_UUID if "management" in command[-3] else LUSTRE_PORT_UUID
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=f'{{"id": "{port_id}"}}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_openstack)
+
+    manager = packer_builder._OpenStackBuildPortManager()
+    management_port_id = manager.create_management_port(
+        network_id=RESOLVED_NETWORK_UUID,
+        security_group_name="hailstack-packer-ssh-test",
+    )
+    lustre_port_id = manager.create_lustre_port(
+        network_id=RESOLVED_LUSTRE_NETWORK_UUID,
+    )
+    manager.cleanup(lustre_port_id)
+    manager.cleanup(management_port_id)
+
+    assert management_port_id == MANAGEMENT_PORT_UUID
+    assert lustre_port_id == LUSTRE_PORT_UUID
+    assert openstack_commands == [
+        [
+            "openstack",
+            "port",
+            "create",
+            "--network",
+            RESOLVED_NETWORK_UUID,
+            "--security-group",
+            "default",
+            "--security-group",
+            "hailstack-packer-ssh-test",
+            "--enable-port-security",
+            "hailstack-packer-management-aaaaaaaa",
+            "-f",
+            "json",
+        ],
+        [
+            "openstack",
+            "port",
+            "create",
+            "--network",
+            RESOLVED_LUSTRE_NETWORK_UUID,
+            "--no-security-group",
+            "--disable-port-security",
+            "hailstack-packer-lustre-aaaaaaaa",
+            "-f",
+            "json",
+        ],
+        [
+            "openstack",
+            "port",
+            "delete",
+            LUSTRE_PORT_UUID,
+        ],
+        [
+            "openstack",
+            "port",
+            "delete",
+            MANAGEMENT_PORT_UUID,
+        ],
+    ]
+
+
+def test_build_image_creates_temporary_ssh_port_for_floating_ip_build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Open TCP/22 on a temporary build security group for floating IP SSH."""
+    """Open TCP/22 only on a temporary management port for floating IP SSH."""
     config = load_config(
         _write_config(
             tmp_path / "cluster.toml",
@@ -737,6 +1026,13 @@ def test_build_image_creates_temporary_ssh_security_group_for_floating_ip_build(
         assert text
         assert not check
         openstack_commands.append(command)
+        if command[:3] == ["openstack", "port", "create"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=f'{{"id": "{MANAGEMENT_PORT_UUID}"}}\n',
+                stderr="",
+            )
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
@@ -792,6 +1088,27 @@ def test_build_image_creates_temporary_ssh_security_group_for_floating_ip_build(
         ],
         [
             "openstack",
+            "port",
+            "create",
+            "--network",
+            NETWORK_UUID,
+            "--security-group",
+            "default",
+            "--security-group",
+            security_group_name,
+            "--enable-port-security",
+            "hailstack-packer-management-aaaaaaaa",
+            "-f",
+            "json",
+        ],
+        [
+            "openstack",
+            "port",
+            "delete",
+            MANAGEMENT_PORT_UUID,
+        ],
+        [
+            "openstack",
             "security",
             "group",
             "delete",
@@ -800,7 +1117,8 @@ def test_build_image_creates_temporary_ssh_security_group_for_floating_ip_build(
     ]
     command = recorded_commands[0]
     assert "floating_ip_pool=public" in command
-    assert f"ssh_security_group={security_group_name}" in command
+    assert f"ports={MANAGEMENT_PORT_UUID}" in command
+    assert f"ssh_security_group={security_group_name}" not in command
     assert not any("cloudforms_ssh_in" in argument for argument in command)
 
 
@@ -817,6 +1135,8 @@ def test_build_image_skips_temporary_ssh_security_group_without_floating_ip_pool
     )
     template_path = _write_template_assets(tmp_path)
     security_groups = _RecordingSecurityGroupManager()
+    port_events: list[str] = []
+    ports = _RecordingPortManager(port_events)
     recorded_commands: list[list[str]] = []
 
     def fake_runner(
@@ -834,11 +1154,13 @@ def test_build_image_skips_temporary_ssh_security_group_without_floating_ip_pool
         runner=fake_runner,
         template_path=template_path,
         security_group_manager=security_groups,
+        port_manager=ports,
     )
 
     assert security_groups.events == []
+    assert port_events == []
     assert "floating_ip_pool=" in recorded_commands[0]
-    assert "ssh_security_group=" in recorded_commands[0]
+    assert "ports=" in recorded_commands[0]
 
 
 def test_build_image_cleans_up_temporary_ssh_security_group_when_packer_fails(
@@ -849,8 +1171,9 @@ def test_build_image_cleans_up_temporary_ssh_security_group_when_packer_fails(
         _write_config(tmp_path / "cluster.toml", packer_floating_ip_pool="public")
     )
     template_path = _write_template_assets(tmp_path)
-    security_groups = _RecordingSecurityGroupManager()
     events: list[str] = []
+    security_groups = _SharedRecordingSecurityGroupManager(events)
+    ports = _RecordingPortManager(events)
 
     def fake_runner(
         command: list[str],
@@ -868,12 +1191,15 @@ def test_build_image_cleans_up_temporary_ssh_security_group_when_packer_fails(
             runner=fake_runner,
             template_path=template_path,
             security_group_manager=security_groups,
+            port_manager=ports,
         )
 
-    assert events == ["runner"]
-    assert security_groups.events == [
-        "create",
-        "cleanup:hailstack-packer-ssh-test",
+    assert events == [
+        "sg:create",
+        f"port:create-management:{NETWORK_UUID}:hailstack-packer-ssh-test",
+        "runner",
+        f"port:cleanup:{MANAGEMENT_PORT_UUID}",
+        "sg:cleanup:hailstack-packer-ssh-test",
     ]
 
 
@@ -896,6 +1222,8 @@ def test_build_image_logs_warning_when_temporary_ssh_security_group_cleanup_fail
             raise PackerError("delete failed")
 
     security_groups = FailingCleanupSecurityGroupManager()
+    port_events: list[str] = []
+    ports = _RecordingPortManager(port_events)
 
     def fake_runner(
         command: list[str],
@@ -912,9 +1240,14 @@ def test_build_image_logs_warning_when_temporary_ssh_security_group_cleanup_fail
             runner=fake_runner,
             template_path=template_path,
             security_group_manager=security_groups,
+            port_manager=ports,
         )
 
     assert result == "image-123"
+    assert port_events == [
+        f"port:create-management:{NETWORK_UUID}:hailstack-packer-ssh-test",
+        f"port:cleanup:{MANAGEMENT_PORT_UUID}",
+    ]
     assert security_groups.events == [
         "create",
         "cleanup:hailstack-packer-ssh-test",
@@ -922,6 +1255,60 @@ def test_build_image_logs_warning_when_temporary_ssh_security_group_cleanup_fail
     assert "Could not delete temporary Packer SSH security group" in caplog.text
     assert "hailstack-packer-ssh-test" in caplog.text
     assert "delete failed" in caplog.text
+
+
+def test_build_image_logs_warning_when_temporary_port_cleanup_fails(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keep the primary Packer result visible when port cleanup fails."""
+    config = load_config(
+        _write_config(tmp_path / "cluster.toml", packer_floating_ip_pool="public")
+    )
+    template_path = _write_template_assets(tmp_path)
+    security_groups = _RecordingSecurityGroupManager()
+
+    class FailingCleanupPortManager(_RecordingPortManager):
+        """Raise during port cleanup to exercise warning-only handling."""
+
+        def cleanup(self, port_id: str) -> None:
+            """Fail to delete the fake temporary port."""
+            super().cleanup(port_id)
+            raise PackerError("port delete failed")
+
+    port_events: list[str] = []
+    ports = FailingCleanupPortManager(port_events)
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        return _result("artifact,0,id,image-123\n")
+
+    with caplog.at_level(logging.WARNING):
+        result = build_image(
+            config,
+            _bundle(),
+            runner=fake_runner,
+            template_path=template_path,
+            security_group_manager=security_groups,
+            port_manager=ports,
+        )
+
+    assert result == "image-123"
+    assert port_events == [
+        f"port:create-management:{NETWORK_UUID}:hailstack-packer-ssh-test",
+        f"port:cleanup:{MANAGEMENT_PORT_UUID}",
+    ]
+    assert security_groups.events == [
+        "create",
+        "cleanup:hailstack-packer-ssh-test",
+    ]
+    assert "Could not delete temporary Packer port" in caplog.text
+    assert MANAGEMENT_PORT_UUID in caplog.text
+    assert "port delete failed" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -1530,7 +1917,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "network",
         "lustre_network",
         "floating_ip_pool",
-        "ssh_security_group",
+        "ports",
     ):
         assert f'variable "{variable_name}"' in template
 

@@ -66,14 +66,15 @@ variable "floating_ip_pool" {
   default = ""
 }
 
-variable "ssh_security_group" {
+variable "ports" {
   type    = string
   default = ""
 }
 
 locals {
-  packer_networks         = var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]
-  packer_security_groups = var.ssh_security_group == "" ? ["default"] : ["default", var.ssh_security_group]
+  packer_networks         = var.ports == "" ? (var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]) : null
+  packer_ports            = var.ports == "" ? null : split(",", var.ports)
+  packer_security_groups = var.ports == "" ? ["default"] : null
 }
 
 source "openstack" "hailstack" {
@@ -84,6 +85,7 @@ source "openstack" "hailstack" {
   ssh_timeout      = "30m"
   config_drive     = true
   networks         = local.packer_networks
+  ports            = local.packer_ports
   floating_ip_pool = var.floating_ip_pool
   security_groups  = local.packer_security_groups
 }

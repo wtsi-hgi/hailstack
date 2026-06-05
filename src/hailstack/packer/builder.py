@@ -80,6 +80,8 @@ _PACKER_SSH_SECURITY_GROUP_NAME_PREFIX = "hailstack-packer-ssh-"
 _PACKER_SSH_SECURITY_GROUP_DESCRIPTION = (
     "Temporary Hailstack Packer SSH access for image build"
 )
+_PACKER_MANAGEMENT_PORT_NAME_PREFIX = "hailstack-packer-management-"
+_PACKER_LUSTRE_PORT_NAME_PREFIX = "hailstack-packer-lustre-"
 _NO_ROUTE_TO_HOST_RE = re.compile(
     r"dial tcp (?P<host>[^:\s]+):(?P<port>\d+): connect: no route to host",
     re.IGNORECASE,
@@ -123,6 +125,27 @@ class BuildSecurityGroupManager(Protocol):
         ...
 
 
+class BuildPortManager(Protocol):
+    """Define how build-image creates temporary OpenStack build ports."""
+
+    def create_management_port(
+        self,
+        *,
+        network_id: str,
+        security_group_name: str,
+    ) -> str:
+        """Create the management port and return its port UUID."""
+        ...
+
+    def create_lustre_port(self, *, network_id: str) -> str:
+        """Create the Lustre port and return its port UUID."""
+        ...
+
+    def cleanup(self, port_id: str) -> None:
+        """Delete a temporary build port by UUID."""
+        ...
+
+
 @dataclass(frozen=True)
 class _PackerOutputEvent:
     """Represent one line captured from a live Packer output stream."""
@@ -133,6 +156,14 @@ class _PackerOutputEvent:
 
 class _OpenStackNetworkShow(BaseModel):
     """Represent the fields Hailstack needs from OpenStack network JSON."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(validation_alias=AliasChoices("id", "ID"))
+
+
+class _OpenStackPortCreate(BaseModel):
+    """Represent the fields Hailstack needs from OpenStack port JSON."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -204,9 +235,76 @@ class _OpenStackBuildSecurityGroupManager:
         )
 
 
+class _OpenStackBuildPortManager:
+    """Manage temporary OpenStack ports for Packer build instances."""
+
+    def create_management_port(
+        self,
+        *,
+        network_id: str,
+        security_group_name: str,
+    ) -> str:
+        """Create the management port with default plus temporary SSH ingress."""
+        name = _temporary_packer_port_name(_PACKER_MANAGEMENT_PORT_NAME_PREFIX)
+        return _run_openstack_port_create_command(
+            [
+                "openstack",
+                "port",
+                "create",
+                "--network",
+                network_id,
+                "--security-group",
+                "default",
+                "--security-group",
+                security_group_name,
+                "--enable-port-security",
+                name,
+                "-f",
+                "json",
+            ],
+            action=f"create temporary Packer management port `{name}`",
+        )
+
+    def create_lustre_port(self, *, network_id: str) -> str:
+        """Create the Lustre port without security groups or port security."""
+        name = _temporary_packer_port_name(_PACKER_LUSTRE_PORT_NAME_PREFIX)
+        return _run_openstack_port_create_command(
+            [
+                "openstack",
+                "port",
+                "create",
+                "--network",
+                network_id,
+                "--no-security-group",
+                "--disable-port-security",
+                name,
+                "-f",
+                "json",
+            ],
+            action=f"create temporary Packer Lustre port `{name}`",
+        )
+
+    def cleanup(self, port_id: str) -> None:
+        """Delete a temporary OpenStack port."""
+        _run_openstack_port_delete_command(
+            [
+                "openstack",
+                "port",
+                "delete",
+                port_id,
+            ],
+            action=f"delete temporary Packer port `{port_id}`",
+        )
+
+
 def _temporary_packer_ssh_security_group_name() -> str:
     """Return a short unique security-group name for a Packer build."""
     return f"{_PACKER_SSH_SECURITY_GROUP_NAME_PREFIX}{uuid4().hex[:8]}"
+
+
+def _temporary_packer_port_name(prefix: str) -> str:
+    """Return a short unique port name for a Packer build."""
+    return f"{prefix}{uuid4().hex[:8]}"
 
 
 def _run_openstack_security_group_command(
@@ -237,6 +335,98 @@ def _run_openstack_security_group_command(
     else:
         detail = f"OpenStack CLI exited with status {result.returncode}."
     raise _security_group_provisioning_error(action, detail)
+
+
+def _run_openstack_port_create_command(
+    command: list[str],
+    *,
+    action: str,
+) -> str:
+    """Run an OpenStack port create command and return the created port UUID."""
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise _port_provisioning_error(
+            action,
+            "The `openstack` CLI was not found on PATH.",
+        ) from error
+
+    if result.returncode != 0:
+        raise _port_provisioning_error(
+            action,
+            _openstack_command_failure_detail(result),
+        )
+
+    return _parse_openstack_port_id(action, result.stdout)
+
+
+def _run_openstack_port_delete_command(
+    command: list[str],
+    *,
+    action: str,
+) -> None:
+    """Run an OpenStack port delete command with user-facing errors."""
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise _port_provisioning_error(
+            action,
+            "The `openstack` CLI was not found on PATH.",
+        ) from error
+
+    if result.returncode == 0:
+        return
+
+    raise _port_provisioning_error(
+        action,
+        _openstack_command_failure_detail(result),
+    )
+
+
+def _openstack_command_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """Return consistent OpenStack CLI failure detail."""
+    detail = _raw_packer_output(result)
+    if detail:
+        return f"OpenStack CLI output: {detail}"
+    return f"OpenStack CLI exited with status {result.returncode}."
+
+
+def _parse_openstack_port_id(action: str, output: str) -> str:
+    """Parse and validate an OpenStack port UUID from CLI JSON output."""
+    try:
+        port = _OpenStackPortCreate.model_validate_json(output)
+    except (json.JSONDecodeError, ValidationError) as error:
+        raise _port_provisioning_error(
+            action,
+            "OpenStack CLI returned JSON without an `id` field.",
+        ) from error
+
+    port_id = port.id.strip()
+    if not _is_uuid(port_id):
+        raise _port_provisioning_error(
+            action,
+            f"OpenStack CLI returned non-UUID port id `{port.id}`.",
+        )
+
+    return port_id
+
+
+def _port_provisioning_error(action: str, detail: str) -> PackerError:
+    """Build a clear PackerError for temporary port setup failures."""
+    return PackerError(
+        f"Could not {action} before launching Packer. Check OpenStack "
+        f"port/security group quota/permissions and credentials. {detail}"
+    )
 
 
 def _security_group_provisioning_error(action: str, detail: str) -> PackerError:
@@ -523,7 +713,7 @@ def _packer_vars(
     *,
     network_id: str,
     lustre_network_id: str,
-    ssh_security_group_name: str = "",
+    port_ids: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Build the documented Packer variable mapping for a bundle."""
     packer_config = config.validate_for_command("build-image").packer
@@ -545,7 +735,7 @@ def _packer_vars(
         "network": network_id,
         "lustre_network": lustre_network_id,
         "floating_ip_pool": floating_ip_pool,
-        "ssh_security_group": ssh_security_group_name,
+        "ports": ",".join(port_ids),
     }
 
 
@@ -901,33 +1091,111 @@ def _normalized_relative_packer_log_path() -> Iterator[None]:
 
 
 @contextmanager
-def _temporary_packer_ssh_security_group(
+def _temporary_packer_networking(
     *,
     floating_ip_pool: str,
+    network_id: str,
+    lustre_network_id: str,
     security_group_manager: BuildSecurityGroupManager,
+    port_manager: BuildPortManager,
     logger: logging.Logger,
-) -> Iterator[str]:
-    """Create temporary SSH ingress only for floating-IP Packer builds."""
+) -> Iterator[tuple[str, ...]]:
+    """Create temporary explicit ports only for floating-IP Packer builds."""
     if not floating_ip_pool:
-        yield ""
+        yield ()
         return
 
     security_group_name = security_group_manager.create()
     logger.info("Packer SSH security group: %s", security_group_name)
+    port_ids: list[str] = []
     try:
-        yield security_group_name
+        _create_temporary_packer_ports(
+            network_id=network_id,
+            lustre_network_id=lustre_network_id,
+            security_group_name=security_group_name,
+            port_manager=port_manager,
+            logger=logger,
+            port_ids=port_ids,
+        )
+    except Exception:
+        _cleanup_temporary_packer_ports(port_ids, port_manager, logger)
+        _cleanup_temporary_packer_security_group(
+            security_group_name,
+            security_group_manager,
+            logger,
+        )
+        raise
+
+    try:
+        yield tuple(port_ids)
     finally:
+        _cleanup_temporary_packer_ports(port_ids, port_manager, logger)
+        _cleanup_temporary_packer_security_group(
+            security_group_name,
+            security_group_manager,
+            logger,
+        )
+
+
+def _create_temporary_packer_ports(
+    *,
+    network_id: str,
+    lustre_network_id: str,
+    security_group_name: str,
+    port_manager: BuildPortManager,
+    logger: logging.Logger,
+    port_ids: list[str],
+) -> None:
+    """Create management first, then optional Lustre, for Packer port input."""
+    management_port_id = port_manager.create_management_port(
+        network_id=network_id,
+        security_group_name=security_group_name,
+    )
+    logger.info("Packer management port: %s", management_port_id)
+    port_ids.append(management_port_id)
+    if lustre_network_id:
+        lustre_port_id = port_manager.create_lustre_port(
+            network_id=lustre_network_id,
+        )
+        logger.info("Packer Lustre port: %s", lustre_port_id)
+        port_ids.append(lustre_port_id)
+
+
+def _cleanup_temporary_packer_ports(
+    port_ids: list[str],
+    port_manager: BuildPortManager,
+    logger: logging.Logger,
+) -> None:
+    """Best-effort delete temporary ports before deleting their security group."""
+    for port_id in reversed(port_ids):
         try:
-            security_group_manager.cleanup(security_group_name)
+            port_manager.cleanup(port_id)
         except Exception as error:
             logger.warning(
-                "Could not delete temporary Packer SSH security group %s: %s",
-                security_group_name,
+                "Could not delete temporary Packer port %s: %s",
+                port_id,
                 error,
             )
 
 
+def _cleanup_temporary_packer_security_group(
+    security_group_name: str,
+    security_group_manager: BuildSecurityGroupManager,
+    logger: logging.Logger,
+) -> None:
+    """Best-effort delete temporary SSH security-group access."""
+    try:
+        security_group_manager.cleanup(security_group_name)
+    except Exception as error:
+        logger.warning(
+            "Could not delete temporary Packer SSH security group %s: %s",
+            security_group_name,
+            error,
+        )
+
+
 _DEFAULT_BUILD_SECURITY_GROUP_MANAGER = _OpenStackBuildSecurityGroupManager()
+_DEFAULT_BUILD_PORT_MANAGER = _OpenStackBuildPortManager()
 
 
 def build_image(
@@ -941,6 +1209,7 @@ def build_image(
     security_group_manager: BuildSecurityGroupManager = (
         _DEFAULT_BUILD_SECURITY_GROUP_MANAGER
     ),
+    port_manager: BuildPortManager = _DEFAULT_BUILD_PORT_MANAGER,
 ) -> str:
     """Run packer build using config.packer settings and return the image ID."""
     active_logger = logger or logging.getLogger(__name__)
@@ -959,11 +1228,14 @@ def build_image(
     assert packer_config is not None
     floating_ip_pool, _ = _packer_floating_ip_pool(config, packer_config)
 
-    with _temporary_packer_ssh_security_group(
+    with _temporary_packer_networking(
         floating_ip_pool=floating_ip_pool,
+        network_id=network_id,
+        lustre_network_id=lustre_network_id,
         security_group_manager=security_group_manager,
+        port_manager=port_manager,
         logger=active_logger,
-    ) as ssh_security_group_name:
+    ) as port_ids:
         active_logger.info("Packer starting")
         with _normalized_relative_packer_log_path():
             result = runner(
@@ -974,7 +1246,7 @@ def build_image(
                         bundle,
                         network_id=network_id,
                         lustre_network_id=lustre_network_id,
-                        ssh_security_group_name=ssh_security_group_name,
+                        port_ids=port_ids,
                     ),
                 ),
                 cwd=resolved_template_path.parent,
