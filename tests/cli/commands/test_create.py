@@ -23,6 +23,7 @@
 
 """Acceptance tests for the D1 create CLI command."""
 
+import json
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -350,6 +351,47 @@ def test_openstack_required_show_raises_network_error_for_invalid_integer_fields
 
     with pytest.raises(NetworkError, match="invalid integer field 'vcpus'"):
         create_module.OpenStackCLIClient().get_flavour("m2.xlarge")
+
+
+def test_openstack_compute_quota_accepts_openstackclient10_limits_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compute quota from OpenStackClient 10 absolute-limit row JSON."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                [
+                    {"Name": "floating_ips", "Value": 10},
+                    {"Name": "floating_ips_used", "Value": 0},
+                    {"Name": "instances", "Value": 482},
+                    {"Name": "instances_used", "Value": 312},
+                    {"Name": "max_total_instances", "Value": 482},
+                    {"Name": "total_instances_used", "Value": 312},
+                    {"Name": "total_cores", "Value": 2413},
+                    {"Name": "total_cores_used", "Value": 1250},
+                    {"Name": "max_total_cores", "Value": 2413},
+                    {"Name": "total_ram", "Value": 25088000},
+                    {"Name": "total_ram_used", "Value": 12631000},
+                    {"Name": "max_total_ram_size", "Value": 25088000},
+                    {"Name": "max_total_floating_ips", "Value": 10},
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(create_module.subprocess, "run", fake_run)
+
+    quota = create_module.OpenStackCLIClient().get_compute_quota()
+
+    assert quota == create_module.ComputeQuota(
+        instances_available=170,
+        cores_available=1163,
+        ram_mb_available=12457000,
+    )
 
 
 def test_openstack_optional_show_retries_transient_endpoint_lookup_failures(

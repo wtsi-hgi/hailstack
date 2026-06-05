@@ -301,18 +301,42 @@ class OpenStackCLIClient:
         return ComputeQuota(
             instances_available=_available_limit(
                 payload,
-                max_key="maxTotalInstances",
-                used_key="totalInstancesUsed",
+                max_keys=(
+                    "maxTotalInstances",
+                    "max_total_instances",
+                    "instances",
+                ),
+                used_keys=(
+                    "totalInstancesUsed",
+                    "total_instances_used",
+                    "instances_used",
+                ),
             ),
             cores_available=_available_limit(
                 payload,
-                max_key="maxTotalCores",
-                used_key="totalCoresUsed",
+                max_keys=(
+                    "maxTotalCores",
+                    "max_total_cores",
+                    "total_cores",
+                ),
+                used_keys=(
+                    "totalCoresUsed",
+                    "total_cores_used",
+                    "cores_used",
+                ),
             ),
             ram_mb_available=_available_limit(
                 payload,
-                max_key="maxTotalRAMSize",
-                used_key="totalRAMUsed",
+                max_keys=(
+                    "maxTotalRAMSize",
+                    "max_total_ram_size",
+                    "total_ram",
+                ),
+                used_keys=(
+                    "totalRAMUsed",
+                    "total_ram_used",
+                    "ram_used",
+                ),
             ),
         )
 
@@ -324,8 +348,17 @@ class OpenStackCLIClient:
         return VolumeQuota(
             gigabytes_available=_available_limit(
                 payload,
-                max_key="maxTotalVolumeGigabytes",
-                used_key="totalGigabytesUsed",
+                max_keys=(
+                    "maxTotalVolumeGigabytes",
+                    "max_total_volume_gigabytes",
+                    "max_total_gigabytes",
+                    "total_gigabytes",
+                ),
+                used_keys=(
+                    "totalGigabytesUsed",
+                    "total_gigabytes_used",
+                    "gigabytes_used",
+                ),
             )
         )
 
@@ -640,17 +673,57 @@ def _optional_output_int(outputs: Mapping[str, object], key: str) -> int | None:
 
 
 def _parse_json_mapping(raw_json: str, source: str) -> dict[str, object]:
-    """Parse a JSON object response into a typed mapping."""
+    """Parse a JSON object or OpenStack name/value rows into a typed mapping."""
     try:
         payload = cast(object, json.loads(raw_json))
     except json.JSONDecodeError as error:
         raise NetworkError(f"{source} returned invalid JSON") from error
 
-    if not isinstance(payload, dict):
-        raise NetworkError(f"{source} returned a non-object JSON payload")
+    if isinstance(payload, list):
+        return _parse_json_name_value_rows(cast(list[object], payload), source)
 
-    raw_payload = cast(dict[object, object], payload)
-    return {str(key): value for key, value in raw_payload.items()}
+    if isinstance(payload, dict):
+        raw_payload = cast(dict[object, object], payload)
+        return {str(key): value for key, value in raw_payload.items()}
+
+    raise NetworkError(f"{source} returned a non-object JSON payload")
+
+
+def _parse_json_name_value_rows(
+    rows: list[object],
+    source: str,
+) -> dict[str, object]:
+    """Parse OpenStackClient 10 name/value row JSON into a mapping."""
+    parsed: dict[str, object] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise NetworkError(f"{source} returned invalid name/value JSON rows")
+
+        raw_row = cast(dict[object, object], row)
+        name = raw_row.get("Name") or raw_row.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise NetworkError(f"{source} returned invalid name/value JSON rows")
+
+        if "Value" in raw_row:
+            value = raw_row["Value"]
+        elif "value" in raw_row:
+            value = raw_row["value"]
+        else:
+            raise NetworkError(f"{source} returned invalid name/value JSON rows")
+
+        parsed[name.strip()] = value
+
+    return parsed
+
+
+def _require_int_from_any(payload: Mapping[str, object], keys: tuple[str, ...]) -> int:
+    """Extract an integer field from the first present key."""
+    for key in keys:
+        if key in payload:
+            return _require_int(payload, key)
+
+    primary_key = keys[0]
+    raise NetworkError(f"OpenStack CLI response missing integer field '{primary_key}'")
 
 
 def _require_int(payload: Mapping[str, object], key: str) -> int:
@@ -716,14 +789,14 @@ def _attached_volume_ids(value: object) -> list[str]:
 def _available_limit(
     payload: Mapping[str, object],
     *,
-    max_key: str,
-    used_key: str,
+    max_keys: tuple[str, ...],
+    used_keys: tuple[str, ...],
 ) -> int:
     """Calculate available quota from OpenStack absolute limit fields."""
-    maximum = _require_int(payload, max_key)
+    maximum = _require_int_from_any(payload, max_keys)
     if maximum < 0:
         return sys.maxsize
-    used = _require_int(payload, used_key)
+    used = _require_int_from_any(payload, used_keys)
     return max(maximum - used, 0)
 
 
