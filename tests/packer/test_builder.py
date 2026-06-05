@@ -27,6 +27,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -40,6 +42,7 @@ from hailstack.packer.builder import (
     REQUIRED_PACKER_SCRIPT_PATHS,
     _packer_vars,
     _resolve_openstack_network_id,
+    _run_packer,
     build_image,
 )
 
@@ -115,6 +118,30 @@ def _result(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def test_default_packer_runner_stops_on_ssh_no_route_debug_log(
+    tmp_path: Path,
+) -> None:
+    """Stop waiting when Packer's SSH debug log proves the fixed IP is unreachable."""
+    script = (
+        "import os, pathlib, time\n"
+        "log_path = pathlib.Path(os.environ['PACKER_LOG_PATH'])\n"
+        "log_path.write_text("
+        "'2026/06/05 TCP connection to SSH ip/port failed: "
+        "dial tcp 192.168.252.82:22: connect: no route to host\\n', "
+        "encoding='utf-8'"
+        ")\n"
+        "time.sleep(2)\n"
+    )
+
+    start_time = time.monotonic()
+    result = _run_packer([sys.executable, "-c", script], cwd=tmp_path)
+    elapsed_seconds = time.monotonic() - start_time
+
+    assert result.returncode != 0
+    assert elapsed_seconds < 1.5
+    assert "dial tcp 192.168.252.82:22: connect: no route to host" in result.stderr
 
 
 def _write_template_assets(tmp_path: Path) -> Path:
@@ -615,6 +642,57 @@ def test_build_image_failure_summarizes_machine_readable_packer_output(
     assert "openstack.hailstack: Timeout waiting for SSH." in message
     assert "Raw Packer output:" in message
     assert "1780586088,,ui,error" in message
+
+
+def test_build_image_no_route_failure_explains_floating_ip_fix(
+    tmp_path: Path,
+) -> None:
+    """Explain how to make remote fixed-IP SSH reachable instead of timing out."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            network_name="cloudforms_network",
+            packer_floating_ip_pool="",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    packer_debug_output = "\n".join(
+        (
+            "2026/06/05 10:00:00 packer-plugin-openstack: Floating IP not required",
+            "2026/06/05 10:00:01 packer-plugin-openstack: "
+            "Using SSH communicator to connect: 192.168.252.82",
+            "2026/06/05 10:00:02 packer-plugin-openstack: "
+            "TCP connection to SSH ip/port failed: dial tcp 192.168.252.82:22: "
+            "connect: no route to host",
+        )
+    )
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        return _result("", stderr=packer_debug_output, returncode=1)
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fake_runner,
+            template_path=template_path,
+            network_resolver=lambda network_name: RESOLVED_NETWORK_UUID,
+        )
+
+    message = str(raised.value)
+    assert (
+        "could not SSH to the temporary build instance fixed IP `192.168.252.82`"
+        in message
+    )
+    assert "no route to host" in message
+    assert "`cluster.floating_ip_pool`" in message
+    assert "`[packer].floating_ip_pool`" in message
+    assert "`cluster.network_name` (`cloudforms_network`)" in message
 
 
 def test_build_image_maps_hadoop_version_to_packer_vars(tmp_path: Path) -> None:
