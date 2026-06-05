@@ -93,6 +93,11 @@ source "openstack" "hailstack" {
 build {
   sources = ["source.openstack.hailstack"]
 
+  provisioner "file" {
+    source      = "${path.root}/scripts/apt-locks.sh"
+    destination = "/tmp/hailstack-packer-apt-locks.sh"
+  }
+
   provisioner "shell" {
     execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E {{ .Path }}"
     scripts = [

@@ -40,6 +40,7 @@ from hailstack.config.compatibility import Bundle
 from hailstack.config.parser import load_config
 from hailstack.errors import PackerError
 from hailstack.packer.builder import (
+    PACKER_ROOT_PATH,
     PACKER_SCRIPTS_PATH,
     PACKER_TEMPLATE_PATH,
     REQUIRED_PACKER_SCRIPT_PATHS,
@@ -55,6 +56,14 @@ RESOLVED_NETWORK_UUID = "22222222-3333-4444-5555-666666666666"
 RESOLVED_LUSTRE_NETWORK_UUID = "44444444-5555-6666-7777-888888888888"
 MANAGEMENT_PORT_UUID = "55555555-6666-7777-8888-999999999999"
 LUSTRE_PORT_UUID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+PACKER_APT_HELPER_RELATIVE_PATH = Path("scripts/apt-locks.sh")
+PACKER_APT_HELPER_PATH = PACKER_ROOT_PATH / PACKER_APT_HELPER_RELATIVE_PATH
+PACKER_REMOTE_APT_HELPER_PATH = "/tmp/hailstack-packer-apt-locks.sh"
+PACKER_APT_SCRIPT_RELATIVE_PATHS = (
+    Path("scripts/base.sh"),
+    Path("scripts/ubuntu/packages.sh"),
+    Path("scripts/ubuntu/netdata.sh"),
+)
 
 
 def _write_config(
@@ -234,7 +243,11 @@ def test_default_packer_runner_stops_on_ssh_no_route_debug_log(
     assert "dial tcp 192.168.252.82:22: connect: no route to host" in result.stderr
 
 
-def _write_template_assets(tmp_path: Path) -> Path:
+def _write_template_assets(
+    tmp_path: Path,
+    *,
+    include_apt_helper: bool = True,
+) -> Path:
     """Create a minimal template tree for unit tests that stub out the runner."""
     template_path = tmp_path / "hailstack.pkr.hcl"
     template_path.write_text("build {}\n", encoding="utf-8")
@@ -242,6 +255,15 @@ def _write_template_assets(tmp_path: Path) -> Path:
     for script_path in REQUIRED_PACKER_SCRIPT_PATHS:
         relative_path = script_path.relative_to(PACKER_SCRIPTS_PATH.parent)
         target_path = tmp_path / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n",
+            encoding="utf-8",
+        )
+        target_path.chmod(0o755)
+
+    if include_apt_helper:
+        target_path = tmp_path / PACKER_APT_HELPER_RELATIVE_PATH
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\n",
@@ -1911,6 +1933,32 @@ def test_build_image_fails_before_runner_when_template_assets_missing(
         )
 
 
+def test_build_image_fails_before_runner_when_apt_lock_helper_missing(
+    tmp_path: Path,
+) -> None:
+    """Reject template trees missing the apt/dpkg lock helper."""
+    config = load_config(_write_config(tmp_path / "cluster.toml"))
+    template_path = _write_template_assets(tmp_path, include_apt_helper=False)
+
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        raise AssertionError("runner should not be called")
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fail_runner,
+            template_path=template_path,
+        )
+
+    assert "scripts/apt-locks.sh" in str(raised.value)
+
+
 def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
     """Check the checked-in template wires all provisioner scripts and bundle vars."""
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1952,6 +2000,29 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         assert f'"{env_name}=${{var.' in template
 
 
+def test_repo_packer_template_uploads_apt_lock_helper_before_scripts() -> None:
+    """Upload the apt/dpkg helper before any shell provisioner uses it."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    file_block = re.search(
+        r'provisioner\s+"file"\s*\{(?P<body>.*?)\n\s*\}',
+        template,
+        re.S,
+    )
+
+    assert file_block is not None
+    assert re.search(
+        r'^\s*source\s*=\s*"\${path\.root}/scripts/apt-locks\.sh"\s*$',
+        file_block["body"],
+        re.M,
+    )
+    assert re.search(
+        rf'^\s*destination\s*=\s*"{PACKER_REMOTE_APT_HELPER_PATH}"\s*$',
+        file_block["body"],
+        re.M,
+    )
+    assert template.index('provisioner "file"') < template.index('provisioner "shell"')
+
+
 def test_repo_packer_shell_provisioner_runs_as_root_and_preserves_env() -> None:
     """Run provisioner scripts through passwordless sudo with bundle env vars."""
     provisioner_body = _repo_shell_provisioner_block()
@@ -1979,6 +2050,56 @@ def test_repo_packer_template_roots_scripts_at_template_directory() -> None:
 
     assert actual_entries == expected_entries
     assert not any(entry.startswith("scripts/") for entry in actual_entries)
+
+
+def test_repo_packer_apt_helper_waits_bounded_for_unattended_dpkg_locks() -> None:
+    """Keep the apt/dpkg helper bounded and aware of unattended apt activity."""
+    content = PACKER_APT_HELPER_PATH.read_text(encoding="utf-8")
+
+    assert "HAILSTACK_APT_LOCK_TIMEOUT_SECONDS" in content
+    assert "HAILSTACK_APT_LOCK_POLL_SECONDS" in content
+    for lock_path in (
+        "/var/lib/dpkg/lock-frontend",
+        "/var/lib/dpkg/lock",
+        "/var/lib/apt/lists/lock",
+        "/var/cache/apt/archives/lock",
+    ):
+        assert lock_path in content
+    for unit_name in (
+        "apt-daily.timer",
+        "apt-daily-upgrade.timer",
+        "apt-daily.service",
+        "apt-daily-upgrade.service",
+        "unattended-upgrades.service",
+    ):
+        assert unit_name in content
+
+    assert "fuser" in content or "lsof" in content
+    assert "DPkg::Lock::Timeout" in content
+    assert "sleep" in content
+    assert "return 1" in content
+
+
+def test_repo_packer_apt_scripts_call_helper_before_apt_commands() -> None:
+    """Require Packer apt scripts to go through the lock-aware helper."""
+    direct_command_pattern = re.compile(r"^\s*(apt-get|apt|dpkg)\b", re.M)
+    offenders: list[str] = []
+
+    for relative_path in PACKER_APT_SCRIPT_RELATIVE_PATHS:
+        script_path = PACKER_ROOT_PATH / relative_path
+        content = script_path.read_text(encoding="utf-8")
+        assert PACKER_REMOTE_APT_HELPER_PATH in content
+        assert "hailstack_apt_get" in content
+
+        if relative_path == Path("scripts/base.sh"):
+            assert "hailstack_add_apt_repository -y ppa:deadsnakes/ppa" in content
+
+    for script_path in REQUIRED_PACKER_SCRIPT_PATHS:
+        content = script_path.read_text(encoding="utf-8")
+        for match in direct_command_pattern.finditer(content):
+            offenders.append(f"{script_path.relative_to(PACKER_ROOT_PATH)}: {match[0]}")
+
+    assert offenders == []
 
 
 def test_repo_packer_scripts_are_executable_and_embed_version_checks() -> None:
@@ -2156,7 +2277,7 @@ def test_e2_base_venv_preinstalls_are_declared_via_uv() -> None:
         PACKER_SCRIPTS_PATH / "base.sh": [
             'PYTHON_BIN="python${PYTHON_VERSION}"',
             'PYTHON_VENV_PACKAGE="${PYTHON_BIN}-venv"',
-            "add-apt-repository -y ppa:deadsnakes/ppa",
+            "hailstack_add_apt_repository -y ppa:deadsnakes/ppa",
             '"${PYTHON_BIN}" -m venv /opt/hailstack/base-venv',
             "/opt/hailstack/base-venv/bin/python -m pip install --upgrade pip uv",
             "/opt/hailstack/base-venv/bin/python -m venv --system-site-packages "

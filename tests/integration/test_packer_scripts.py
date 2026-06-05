@@ -167,6 +167,10 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
         "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
     )
     _write_stub_command(
+        bin_dir / "fuser",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    )
+    _write_stub_command(
         bin_dir / "systemctl",
         "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
     )
@@ -199,6 +203,9 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
     script_path = _rewrite_base_script(BASE_SCRIPT_PATH, temp_root)
     env = dict(os.environ)
     env.update(MOCK_VERSION_ENV)
+    env["HAILSTACK_PACKER_APT_HELPER"] = str(
+        REPOSITORY_ROOT / "packer" / "scripts" / "apt-locks.sh"
+    )
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
 
     result = subprocess.run(

@@ -58,6 +58,7 @@ from hailstack.runtime_paths import (
 PACKER_ROOT_PATH = PACKER_ROOT
 PACKER_TEMPLATE_PATH = RUNTIME_PACKER_TEMPLATE_PATH
 PACKER_SCRIPTS_PATH = RUNTIME_PACKER_SCRIPTS_PATH
+PACKER_APT_LOCK_HELPER_RELATIVE_PATH = Path("scripts/apt-locks.sh")
 REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/base.sh"),
     Path("scripts/ubuntu/packages.sh"),
@@ -68,6 +69,14 @@ REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/ubuntu/gnomad.sh"),
     Path("scripts/ubuntu/uv.sh"),
     Path("scripts/ubuntu/netdata.sh"),
+)
+REQUIRED_PACKER_ASSET_RELATIVE_PATHS = (
+    PACKER_APT_LOCK_HELPER_RELATIVE_PATH,
+    *REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS,
+)
+REQUIRED_PACKER_ASSET_PATHS = tuple(
+    PACKER_ROOT_PATH / relative_path
+    for relative_path in REQUIRED_PACKER_ASSET_RELATIVE_PATHS
 )
 REQUIRED_PACKER_SCRIPT_PATHS = tuple(
     PACKER_ROOT_PATH / relative_path
@@ -1042,11 +1051,11 @@ def _is_packer_diagnostic_message(message: str) -> bool:
     )
 
 
-def _required_packer_script_paths(template_path: Path) -> tuple[Path, ...]:
-    """Return the script paths required by the checked-in packer template."""
+def _required_packer_asset_paths(template_path: Path) -> tuple[Path, ...]:
+    """Return the asset paths required by the checked-in packer template."""
     return tuple(
         template_path.parent / relative_path
-        for relative_path in REQUIRED_PACKER_SCRIPT_RELATIVE_PATHS
+        for relative_path in REQUIRED_PACKER_ASSET_RELATIVE_PATHS
     )
 
 
@@ -1058,12 +1067,12 @@ def _validate_packer_assets(template_path: Path) -> None:
     if not template_path.is_file():
         missing_paths.append(str(template_path))
 
-    for script_path in _required_packer_script_paths(template_path):
-        if not script_path.is_file():
-            missing_paths.append(str(script_path))
+    for asset_path in _required_packer_asset_paths(template_path):
+        if not asset_path.is_file():
+            missing_paths.append(str(asset_path))
             continue
-        if not os.access(script_path, os.X_OK):
-            non_executable_paths.append(str(script_path))
+        if asset_path.suffix == ".sh" and not os.access(asset_path, os.X_OK):
+            non_executable_paths.append(str(asset_path))
 
     problems: list[str] = []
     if missing_paths:
@@ -1268,6 +1277,7 @@ __all__ = [
     "PACKER_ROOT_PATH",
     "PACKER_SCRIPTS_PATH",
     "PACKER_TEMPLATE_PATH",
+    "REQUIRED_PACKER_ASSET_PATHS",
     "REQUIRED_PACKER_SCRIPT_PATHS",
     "build_image",
 ]
