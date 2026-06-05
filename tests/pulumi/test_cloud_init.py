@@ -864,7 +864,7 @@ def test_lustre_network_configures_lustre_mount_point(
         "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
         in result
     )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
 def test_lustre_network_uses_configured_mount_target(
@@ -897,7 +897,7 @@ def test_lustre_network_uses_configured_mount_target(
         "'192.0.2.10@tcp:/custom /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
         in result
     )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
 def test_lustre_cloud_init_replaces_baked_mounts_before_final_setup(
@@ -939,7 +939,7 @@ def test_lustre_cloud_init_replaces_baked_mounts_before_final_setup(
         ) in joined_bootcmd
         assert "systemctl mask --force mountLustre.service || true" in shell_script
         assert shell_script.index("awk '$3 != \"lustre\" { print }' /etc/fstab") < (
-            shell_script.index("mountpoint -q /lustre || mount /lustre")
+            shell_script.index("timeout --kill-after=15s 120s mount /lustre")
         )
 
 
@@ -991,6 +991,56 @@ def test_first_boot_cleanup_uses_compatible_systemd_and_masks_baked_blockers(
             in joined_bootcmd
         )
         assert "metricbeat-openstack-setup.service" not in shell_script
+
+
+def test_lustre_mount_is_bounded_and_local_baked_units_are_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep configured Lustre from holding cloud-init final indefinitely."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+        shell_script = _cloud_init_part(rendered_cloud_init, "text/x-shellscript")
+
+        for service in (
+            "mountLustre.service",
+            "metricbeat-openstack-setup.service",
+        ):
+            remove_command = f"rm -f /etc/systemd/system/{service}"
+            mask_command = f"systemctl mask --force {service} || true"
+            assert remove_command in joined_bootcmd
+            assert joined_bootcmd.index(remove_command) < joined_bootcmd.index(
+                mask_command
+            )
+
+        assert "mountpoint -q /lustre || mount /lustre" not in shell_script
+        assert "timeout --kill-after=15s 120s mount /lustre" in shell_script
+        assert (
+            "Hailstack warning: configured Lustre target did not mount within "
+            "120 seconds or failed; continuing cloud-init final setup"
+        ) in shell_script
+        assert "rm -f /etc/systemd/system/mountLustre.service" in shell_script
 
 
 def test_nginx_config_is_written_only_to_sites_enabled_path(
@@ -1150,7 +1200,7 @@ def test_worker_lustre_network_configures_lustre_mount_point() -> None:
         "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
         in result
     )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
 def test_worker_extras_system_packages_are_installed_with_apt() -> None:

@@ -605,6 +605,8 @@ def _baked_service_cleanup_commands(service: str) -> list[str]:
         f"systemctl stop --no-block {service} || true",
         f"systemctl kill {service} || true",
         f"systemctl disable {service} || true",
+        f"rm -f /etc/systemd/system/{service}",
+        "systemctl daemon-reload || true",
         f"systemctl mask --force {service} || true",
     ]
 
@@ -639,8 +641,26 @@ def _lustre_commands(config: ClusterConfig) -> list[str]:
     return [
         *_baked_lustre_cleanup_commands(config),
         "install -d -m 0755 /lustre",
-        "mountpoint -q /lustre || mount /lustre",
+        _configured_lustre_mount_command(),
     ]
+
+
+def _configured_lustre_mount_command() -> str:
+    """Render a bounded configured Lustre mount attempt."""
+    return (
+        "if mountpoint -q /lustre; then\n"
+        "  echo 'Hailstack Lustre mount already active at /lustre'\n"
+        "else\n"
+        "  echo 'Hailstack attempting configured Lustre mount at /lustre with "
+        "120 second timeout'\n"
+        "  if timeout --kill-after=15s 120s mount /lustre; then\n"
+        "    echo 'Hailstack mounted configured Lustre target at /lustre'\n"
+        "  else\n"
+        "    echo 'Hailstack warning: configured Lustre target did not mount "
+        "within 120 seconds or failed; continuing cloud-init final setup' >&2\n"
+        "  fi\n"
+        "fi"
+    )
 
 
 def _worker_volume_commands(config: ClusterConfig, master_ip: str) -> list[str]:
