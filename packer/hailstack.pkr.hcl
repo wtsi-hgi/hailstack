@@ -56,9 +56,18 @@ variable "network" {
   type = string
 }
 
+variable "lustre_network" {
+  type    = string
+  default = ""
+}
+
 variable "floating_ip_pool" {
   type    = string
   default = ""
+}
+
+locals {
+  packer_networks = var.lustre_network == "" ? [var.network] : [var.network, var.lustre_network]
 }
 
 source "openstack" "hailstack" {
@@ -68,7 +77,7 @@ source "openstack" "hailstack" {
   ssh_username     = var.ssh_username
   ssh_timeout      = "30m"
   config_drive     = true
-  networks         = [var.network]
+  networks         = local.packer_networks
   floating_ip_pool = var.floating_ip_pool
 }
 

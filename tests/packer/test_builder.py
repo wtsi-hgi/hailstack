@@ -47,17 +47,23 @@ from hailstack.packer.builder import (
 )
 
 NETWORK_UUID = "11111111-2222-3333-4444-555555555555"
+LUSTRE_NETWORK_UUID = "33333333-4444-5555-6666-777777777777"
 RESOLVED_NETWORK_UUID = "22222222-3333-4444-5555-666666666666"
+RESOLVED_LUSTRE_NETWORK_UUID = "44444444-5555-6666-7777-888888888888"
 
 
 def _write_config(
     path: Path,
     *,
     network_name: str = NETWORK_UUID,
+    lustre_network: str = "",
     cluster_floating_ip_pool: str = "",
     packer_floating_ip_pool: str = "public",
 ) -> Path:
     """Write a minimal build-image config file."""
+    lustre_network_line = (
+        f'lustre_network = "{lustre_network}"\n' if lustre_network != "" else ""
+    )
     cluster_pool_line = (
         f'floating_ip_pool = "{cluster_floating_ip_pool}"\n'
         if cluster_floating_ip_pool
@@ -74,6 +80,7 @@ def _write_config(
             'name = "test-cluster"\n'
             'master_flavour = "m2.medium"\n'
             f'network_name = "{network_name}"\n'
+            f"{lustre_network_line}"
             f"{cluster_pool_line}"
             'ssh_username = "ubuntu"\n\n'
             "[packer]\n"
@@ -198,6 +205,172 @@ def test_build_image_resolves_network_name_to_uuid_before_packer(
     assert requested_networks == ["cloudforms_network"]
     assert f"network={RESOLVED_NETWORK_UUID}" in command
     assert "network=cloudforms_network" not in command
+
+
+def test_build_image_resolves_lustre_network_name_to_uuid_before_packer(
+    tmp_path: Path,
+) -> None:
+    """Attach the configured Lustre network to temporary build instances."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            network_name="cloudforms_network",
+            lustre_network="lustre-hgi01",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+    requested_networks: list[str] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    def fake_network_resolver(network_name: str) -> str:
+        requested_networks.append(network_name)
+        return {
+            "cloudforms_network": RESOLVED_NETWORK_UUID,
+            "lustre-hgi01": RESOLVED_LUSTRE_NETWORK_UUID,
+        }[network_name]
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        network_resolver=fake_network_resolver,
+    )
+
+    command = recorded_commands[0]
+    assert requested_networks == ["cloudforms_network", "lustre-hgi01"]
+    assert f"network={RESOLVED_NETWORK_UUID}" in command
+    assert f"lustre_network={RESOLVED_LUSTRE_NETWORK_UUID}" in command
+    assert "network=cloudforms_network" not in command
+    assert "lustre_network=lustre-hgi01" not in command
+
+
+def test_build_image_fails_before_runner_when_lustre_network_cannot_resolve(
+    tmp_path: Path,
+) -> None:
+    """Raise a clear PackerError before launching Packer with a bad Lustre net."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            lustre_network="missing-lustre",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    runner_called = False
+
+    def fail_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del command, cwd
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("runner should not be called")
+
+    def fail_network_resolver(network_name: str) -> str:
+        raise PackerError(
+            f"Could not resolve OpenStack network '{network_name}' to the UUID "
+            "Packer requires. Run `openstack network list` and check "
+            "OpenStack credentials."
+        )
+
+    with pytest.raises(PackerError) as raised:
+        build_image(
+            config,
+            _bundle(),
+            runner=fail_runner,
+            template_path=template_path,
+            network_resolver=fail_network_resolver,
+        )
+
+    message = str(raised.value)
+    assert "missing-lustre" in message
+    assert "openstack network list" in message
+    assert "credentials" in message
+    assert not runner_called
+
+
+def test_build_image_keeps_single_network_when_lustre_network_is_blank(
+    tmp_path: Path,
+) -> None:
+    """Treat blank Lustre network config as unset for Packer builds."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            lustre_network="   ",
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+    )
+
+    command = recorded_commands[0]
+    assert f"network={NETWORK_UUID}" in command
+    assert "lustre_network=" in command
+    assert "lustre_network=   " not in command
+
+
+def test_build_image_passes_lustre_network_uuid_without_resolver_call(
+    tmp_path: Path,
+) -> None:
+    """Keep UUID-based Lustre network configs working without OpenStack lookup."""
+    config = load_config(
+        _write_config(
+            tmp_path / "cluster.toml",
+            lustre_network=LUSTRE_NETWORK_UUID,
+        )
+    )
+    template_path = _write_template_assets(tmp_path)
+    recorded_commands: list[list[str]] = []
+
+    def fake_runner(
+        command: list[str],
+        *,
+        cwd: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        recorded_commands.append(command)
+        return _result("artifact,0,id,image-123\n")
+
+    def fail_network_resolver(network_name: str) -> str:
+        raise AssertionError(f"resolver should not be called for {network_name}")
+
+    build_image(
+        config,
+        _bundle(),
+        runner=fake_runner,
+        template_path=template_path,
+        network_resolver=fail_network_resolver,
+    )
+
+    command = recorded_commands[0]
+    assert f"network={NETWORK_UUID}" in command
+    assert f"lustre_network={LUSTRE_NETWORK_UUID}" in command
 
 
 def test_build_image_fails_before_runner_when_network_name_cannot_resolve(
@@ -359,6 +532,27 @@ def test_checked_in_openstack_builder_uses_config_drive() -> None:
     assert re.search(r"^\s*config_drive\s*=\s*true\s*$", source_block["body"], re.M)
 
 
+def test_checked_in_openstack_builder_attaches_configured_lustre_network() -> None:
+    """Attach the optional Lustre network without losing the management network."""
+    template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    source_block = re.search(
+        r'source\s+"openstack"\s+"hailstack"\s*\{(?P<body>.*?)\n\}',
+        template,
+        re.S,
+    )
+    assert source_block is not None
+
+    assert 'variable "lustre_network"' in template
+    assert 'var.lustre_network == ""' in template
+    assert "[var.network]" in template
+    assert "[var.network, var.lustre_network]" in template
+    assert re.search(
+        r"^\s*networks\s*=\s*local\.packer_networks\s*$",
+        source_block["body"],
+        re.M,
+    )
+
+
 def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -> None:
     """Pass the documented base, SSH, network, and bundle vars to Packer."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
@@ -386,6 +580,7 @@ def test_build_image_runs_packer_with_expected_variable_values(tmp_path: Path) -
     assert "ssh_username=ubuntu" in command
     assert "flavor=m2.large" in command
     assert f"network={NETWORK_UUID}" in command
+    assert "lustre_network=" in command
     assert "floating_ip_pool=public" in command
     assert not any(argument.startswith("image_name=") for argument in command)
 
@@ -574,7 +769,14 @@ def test_builder_vars_match_checked_in_template_contract(tmp_path: Path) -> None
     config = load_config(_write_config(tmp_path / "cluster.toml"))
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
     declared_vars = set(re.findall(r'variable "([^"]+)"', template))
-    builder_vars = set(_packer_vars(config, _bundle(), network_id=NETWORK_UUID))
+    builder_vars = set(
+        _packer_vars(
+            config,
+            _bundle(),
+            network_id=NETWORK_UUID,
+            lustre_network_id="",
+        )
+    )
 
     assert builder_vars == declared_vars
     assert 'image_name       = "hailstack-${var.bundle_id}"' in template
@@ -960,6 +1162,7 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
         "ssh_username",
         "flavor",
         "network",
+        "lustre_network",
         "floating_ip_pool",
     ):
         assert f'variable "{variable_name}"' in template
@@ -1136,7 +1339,12 @@ def test_e2_bundle_versions_flow_into_provisioner_environment_vars(
 ) -> None:
     """Map bundle versions into the template contract used by shell provisioners."""
     config = load_config(_write_config(tmp_path / "cluster.toml"))
-    variables = _packer_vars(config, bundle, network_id=NETWORK_UUID)
+    variables = _packer_vars(
+        config,
+        bundle,
+        network_id=NETWORK_UUID,
+        lustre_network_id="",
+    )
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     for env_name, expected_value in expected_pairs.items():

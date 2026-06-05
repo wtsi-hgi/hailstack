@@ -119,7 +119,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    cp example-config.toml my-cluster.toml
    ```
 
-   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Put the contents of your normal SSH public key file, for example `~/.ssh/id_ed25519.pub`, in `ssh_keys.public_keys` so you can SSH to created nodes later. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If your runner cannot SSH directly to instances on that network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
+   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Put the contents of your normal SSH public key file, for example `~/.ssh/id_ed25519.pub`, in `ssh_keys.public_keys` so you can SSH to created nodes later. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If `cluster.lustre_network` is set, `build-image` resolves and attaches it to the temporary Packer instance too. If your runner cannot SSH directly to instances on the management network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
 
    If you installed Hailstack via the SIF and do not have the repository checked out, copy `example-config.toml` out of the image first:
 
@@ -143,7 +143,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    chmod 600 .env
    ```
 
-4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. SSH must be reachable from the runner either through that network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`.
+4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. If `cluster.lustre_network` is set, the temporary instance is attached to that resolved network as a second interface. SSH must be reachable from the runner either through the management network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`.
 
    ```bash
    hailstack build-image --config my-cluster.toml --dotenv .env
@@ -191,7 +191,7 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | `cluster.master_flavour`      | OpenStack flavour for the master VM.                                                                                | `string`  | required                                       | `m2.2xlarge`                   |
 | `cluster.worker_flavour`      | OpenStack flavour for workers. If omitted, Hailstack reuses `cluster.master_flavour`.                               | `string`  | `""` then resolved to `cluster.master_flavour` | `m2.2xlarge`                   |
 | `cluster.network_name`        | Required OpenStack network name for the management interface on all nodes and for Packer image-build instances. Hailstack resolves names to the UUID Packer requires; existing UUID values are also accepted. | `string`  | `cloudforms_network`                           | `cloudforms_network`           |
-| `cluster.lustre_network`      | Optional second network name added to every node for Lustre access.                                                 | `string`  | `""`                                           | `lustre_network`               |
+| `cluster.lustre_network`      | Optional second network name added to every node and Packer image-build instance for Lustre access.                 | `string`  | `""`                                           | `lustre_network`               |
 | `cluster.lustre_mount_target` | Lustre mount target written to `/etc/fstab` when `cluster.lustre_network` is set.                                   | `string`  | `10.1.0.1@tcp:/fsx`                            | `192.0.2.10@tcp:/fsx`          |
 | `cluster.ssh_username`        | Login user used by SSH-based commands and cloud-init paths.                                                         | `string`  | `ubuntu`                                       | `ubuntu`                       |
 | `cluster.monitoring`          | Monitoring mode. Only `netdata` and `none` are accepted.                                                            | `string`  | `netdata`                                      | `netdata`                      |
@@ -202,8 +202,9 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 
 For secure Lustre, both values are site-specific. `cluster.lustre_network`
 must be the OpenStack network that can reach Lustre; Hailstack adds a second
-Neutron port on that network to every node. With OpenStack credentials loaded,
-list the networks your project can see:
+Neutron port on that network to every node and to temporary Packer build
+instances. With OpenStack credentials loaded, list the networks your project
+can see:
 
 ```bash
 openstack network list
@@ -373,7 +374,7 @@ hailstack reboot --config my-cluster.toml --dotenv .env --node my-cluster-worker
 
 Synopsis: Build a Hailstack image for a selected compatibility bundle.
 
-Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. The machine running `hailstack build-image` must be able to SSH to that instance, either because `cluster.network_name` is runner-routable or because a floating IP pool is configured. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool.
+Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. When `cluster.lustre_network` is non-blank, Hailstack resolves that network too and attaches it as a second interface; blank or whitespace-only values keep the previous single-network build. The machine running `hailstack build-image` must be able to SSH to the instance through the management network or a floating IP pool. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool.
 
 Options:
 

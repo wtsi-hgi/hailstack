@@ -387,6 +387,7 @@ def _packer_vars(
     bundle: Bundle,
     *,
     network_id: str,
+    lustre_network_id: str,
 ) -> dict[str, str]:
     """Build the documented Packer variable mapping for a bundle."""
     packer_config = config.validate_for_command("build-image").packer
@@ -406,6 +407,7 @@ def _packer_vars(
         "ssh_username": config.cluster.ssh_username,
         "flavor": packer_config.flavour,
         "network": network_id,
+        "lustre_network": lustre_network_id,
         "floating_ip_pool": floating_ip_pool,
     }
 
@@ -428,6 +430,17 @@ def _resolve_packer_network_id(
             f"OpenStack network resolver returned non-UUID id `{network_id}`.",
         )
     return network_id
+
+
+def _resolve_optional_packer_network_id(
+    configured_network: str,
+    network_resolver: NetworkResolver,
+) -> str:
+    """Return an optional OpenStack network UUID, or blank when unset."""
+    if not configured_network.strip():
+        return ""
+
+    return _resolve_packer_network_id(configured_network, network_resolver)
 
 
 def _is_uuid(value: str) -> bool:
@@ -514,6 +527,7 @@ def _log_packer_networking(
     logger: logging.Logger,
     config: ClusterConfig,
     network_id: str,
+    lustre_network_id: str,
 ) -> None:
     """Log Packer networking choices without exposing credentials."""
     packer_config = config.validate_for_command("build-image").packer
@@ -522,6 +536,12 @@ def _log_packer_networking(
 
     logger.info("Packer OpenStack network: %s", config.cluster.network_name)
     logger.info("Packer OpenStack network UUID: %s", network_id)
+    if lustre_network_id:
+        logger.info(
+            "Packer OpenStack Lustre network: %s",
+            config.cluster.lustre_network,
+        )
+        logger.info("Packer OpenStack Lustre network UUID: %s", lustre_network_id)
     if floating_ip_pool:
         logger.info("Packer floating IP pool: %s (%s)", floating_ip_pool, source)
         return
@@ -760,14 +780,23 @@ def build_image(
         config.cluster.network_name,
         network_resolver,
     )
-    _log_packer_networking(active_logger, config, network_id)
+    lustre_network_id = _resolve_optional_packer_network_id(
+        config.cluster.lustre_network,
+        network_resolver,
+    )
+    _log_packer_networking(active_logger, config, network_id, lustre_network_id)
     active_logger.info("Packer starting")
 
     with _normalized_relative_packer_log_path():
         result = runner(
             _packer_command(
                 resolved_template_path,
-                _packer_vars(config, bundle, network_id=network_id),
+                _packer_vars(
+                    config,
+                    bundle,
+                    network_id=network_id,
+                    lustre_network_id=lustre_network_id,
+                ),
             ),
             cwd=resolved_template_path.parent,
         )
