@@ -48,6 +48,7 @@ VOLUME_KEY_PATH = "/etc/hailstack/volume.key"
 VOLUME_DEVICE_PATH = "/etc/hailstack/volume-device"
 VOLUME_UUID_PATH = "/etc/hailstack/volume-uuid"
 BAKED_LUSTRE_SERVICE = "mountLustre.service"
+BAKED_METRICBEAT_OPENSTACK_SETUP_SERVICE = "metricbeat-openstack-setup.service"
 BASE_VENV_PATH = "/opt/hailstack/base-venv"
 OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
 RUNTIME_PYTHON_PATH = f"{OVERLAY_VENV_PATH}/bin/python"
@@ -145,7 +146,7 @@ def _authorized_keys_content(config: ClusterConfig) -> str:
 def _cloud_config(config: ClusterConfig) -> str:
     """Render early boot and config-stage cloud-init settings."""
     payload = {
-        "bootcmd": _baked_lustre_cleanup_commands(config),
+        "bootcmd": _first_boot_cleanup_commands(config),
         "users": [
             "default",
             {
@@ -595,13 +596,20 @@ def _configured_lustre_fstab_command(config: ClusterConfig) -> str | None:
     )
 
 
+def _baked_service_cleanup_commands(service: str) -> list[str]:
+    """Render commands that stop and mask a baked systemd service."""
+    return [
+        f"systemctl stop --no-block {service} || true",
+        f"systemctl kill {service} || true",
+        f"systemctl disable {service} || true",
+        f"systemctl mask --force {service} || true",
+    ]
+
+
 def _baked_lustre_cleanup_commands(config: ClusterConfig) -> list[str]:
     """Render commands that neutralize baked site-wide Lustre boot behavior."""
     commands = [
-        f"systemctl kill --kill-whom=all {BAKED_LUSTRE_SERVICE} || true",
-        f"systemctl stop --no-block {BAKED_LUSTRE_SERVICE} || true",
-        f"systemctl disable {BAKED_LUSTRE_SERVICE} || true",
-        f"systemctl mask {BAKED_LUSTRE_SERVICE} || true",
+        *_baked_service_cleanup_commands(BAKED_LUSTRE_SERVICE),
         "awk '$3 != \"lustre\" { print }' /etc/fstab > /etc/fstab.hailstack "
         "&& cat /etc/fstab.hailstack > /etc/fstab "
         "&& rm -f /etc/fstab.hailstack",
@@ -611,6 +619,14 @@ def _baked_lustre_cleanup_commands(config: ClusterConfig) -> list[str]:
         commands.append(configured_lustre)
     commands.append("systemctl daemon-reload || true")
     return commands
+
+
+def _first_boot_cleanup_commands(config: ClusterConfig) -> list[str]:
+    """Render early cleanup for baked services that can block cloud-init final."""
+    return [
+        *_baked_service_cleanup_commands(BAKED_METRICBEAT_OPENSTACK_SETUP_SERVICE),
+        *_baked_lustre_cleanup_commands(config),
+    ]
 
 
 def _lustre_commands(config: ClusterConfig) -> list[str]:
