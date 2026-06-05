@@ -599,24 +599,30 @@ def test_o2_packages_script_installs_python_native_build_dependencies(
 def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
     tmp_path: Path,
 ) -> None:
-    """Replace the bad Jupyter/jsonschema set before validating server imports."""
+    """Repair the bad Jupyter/Hail/gnomAD dependency set before validation."""
     temp_root = tmp_path / "root"
     base_venv = temp_root / "opt" / "hailstack" / "base-venv"
     bin_dir = base_venv / "bin"
     command_log = tmp_path / "commands.log"
+    decorator_state = tmp_path / "decorator-version.txt"
+    ipython_state = tmp_path / "ipython-version.txt"
     jsonschema_state = tmp_path / "jsonschema-version.txt"
     jupyterlab_state = tmp_path / "jupyterlab-version.txt"
     jupyter_server_state = tmp_path / "jupyter-server-version.txt"
     jupyterlab_server_state = tmp_path / "jupyterlab-server-version.txt"
     jupyter_events_state = tmp_path / "jupyter-events-version.txt"
+    python_json_logger_state = tmp_path / "python-json-logger-version.txt"
     service_dir = temp_root / "etc" / "systemd" / "system"
     bin_dir.mkdir(parents=True)
     service_dir.mkdir(parents=True)
+    decorator_state.write_text("5.3.1", encoding="utf-8")
+    ipython_state.write_text("9.14.1", encoding="utf-8")
     jsonschema_state.write_text("3.2.0", encoding="utf-8")
     jupyterlab_state.write_text("4.5.8", encoding="utf-8")
     jupyter_server_state.write_text("2.17.0", encoding="utf-8")
     jupyterlab_server_state.write_text("2.28.0", encoding="utf-8")
     jupyter_events_state.write_text("0.12.1", encoding="utf-8")
+    python_json_logger_state.write_text("4.1.0", encoding="utf-8")
     (service_dir / "jupyter-lab.service").write_text(
         "[Unit]\nDescription=JupyterLab\n",
         encoding="utf-8",
@@ -633,6 +639,9 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         "saw_server=0\n"
         "saw_events=0\n"
         "saw_jsonschema=0\n"
+        "saw_decorator=0\n"
+        "saw_ipython=0\n"
+        "saw_python_json_logger=0\n"
         "saw_upgrade=0\n"
         'for arg in "$@"; do\n'
         '  [[ "$arg" == "--upgrade" ]] && saw_upgrade=1\n'
@@ -641,16 +650,25 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         '  [[ "$arg" == "jupyterlab-server==2.16.6" ]] && saw_server=1\n'
         '  [[ "$arg" == "jupyter-events==0.6.3" ]] && saw_events=1\n'
         '  [[ "$arg" == "jsonschema==3.2.0" ]] && saw_jsonschema=1\n'
+        '  [[ "$arg" == "decorator==4.4.2" ]] && saw_decorator=1\n'
+        '  [[ "$arg" == "ipython==8.39.0" ]] && saw_ipython=1\n'
+        '  [[ "$arg" == "python-json-logger==2.0.7" ]] '
+        "&& saw_python_json_logger=1\n"
         "done\n"
         'if [[ "$saw_upgrade" == "1" && "$saw_jupyter" == "1" '
         '&& "$saw_core_server" == "1" && "$saw_server" == "1" '
         '&& "$saw_events" == "1" '
-        '&& "$saw_jsonschema" == "1" ]]; then\n'
+        '&& "$saw_jsonschema" == "1" && "$saw_decorator" == "1" '
+        '&& "$saw_ipython" == "1" '
+        '&& "$saw_python_json_logger" == "1" ]]; then\n'
         '  printf "3.5.3" >"${HAILSTACK_JUPYTERLAB_STATE}"\n'
         '  printf "2.10.0" >"${HAILSTACK_JUPYTER_SERVER_STATE}"\n'
         '  printf "2.16.6" >"${HAILSTACK_JUPYTERLAB_SERVER_STATE}"\n'
         '  printf "0.6.3" >"${HAILSTACK_JUPYTER_EVENTS_STATE}"\n'
         '  printf "3.2.0" >"${HAILSTACK_JSONSCHEMA_STATE}"\n'
+        '  printf "4.4.2" >"${HAILSTACK_DECORATOR_STATE}"\n'
+        '  printf "8.39.0" >"${HAILSTACK_IPYTHON_STATE}"\n'
+        '  printf "2.0.7" >"${HAILSTACK_PYTHON_JSON_LOGGER_STATE}"\n'
         "fi\n",
     )
     _write_stub_command(
@@ -658,11 +676,30 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'printf "python %s\\n" "$*" >>"${HAILSTACK_COMMAND_LOG}"\n'
+        'decorator_version="$(cat "${HAILSTACK_DECORATOR_STATE}")"\n'
+        'ipython_version="$(cat "${HAILSTACK_IPYTHON_STATE}")"\n'
         'jsonschema_version="$(cat "${HAILSTACK_JSONSCHEMA_STATE}")"\n'
         'server_version="$(cat "${HAILSTACK_JUPYTERLAB_SERVER_STATE}")"\n'
         'events_version="$(cat "${HAILSTACK_JUPYTER_EVENTS_STATE}")"\n'
+        'logger_version="$(cat "${HAILSTACK_PYTHON_JSON_LOGGER_STATE}")"\n'
         'if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then\n'
         '  [[ "${3:-}" == "check" ]]\n'
+        '  if [[ "$ipython_version" == "9.14.1" ]]; then\n'
+        '    printf "biocommons-seqrepo 0.6.11 has requirement ipython~=8.4, '
+        'but you have ipython 9.14.1\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        '  if [[ "$decorator_version" == "5.3.1" ]]; then\n'
+        '    printf "hail 0.2.137 has requirement decorator<5, '
+        'but you have decorator 5.3.1\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        '  if [[ "$logger_version" == "4.1.0" ]]; then\n'
+        '    printf "hail 0.2.137 has requirement '
+        "python-json-logger<3,>=2.0.2, "
+        'but you have python-json-logger 4.1.0\\n" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
         '  if [[ "$server_version" == "2.28.0" ]]; then\n'
         '    printf "jupyterlab-server 2.28.0 requires jsonschema>=4.18.0\\n" >&2\n'
         "    exit 1\n"
@@ -671,7 +708,10 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         '    printf "jupyter-events 0.12.1 requires jsonschema>=4.18.0\\n" >&2\n'
         "    exit 1\n"
         "  fi\n"
+        '  [[ "$decorator_version" == "4.4.2" ]]\n'
+        '  [[ "$ipython_version" == "8.39.0" ]]\n'
         '  [[ "$jsonschema_version" == "3.2.0" ]]\n'
+        '  [[ "$logger_version" == "2.0.7" ]]\n'
         '  printf "No broken requirements found.\\n"\n'
         "  exit 0\n"
         "fi\n"
@@ -679,6 +719,9 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         '  [[ "$*" == *"jupyterlab.labapp"* ]]\n'
         '  [[ "$*" == *"jupyter_server.serverapp"* ]]\n'
         '  [[ "$*" == *"jupyterlab-server"* ]]\n'
+        '  [[ "$*" == *"metadata.version(\'decorator\')"* ]]\n'
+        '  [[ "$*" == *"metadata.version(\'ipython\')"* ]]\n'
+        '  [[ "$*" == *"metadata.version(\'python-json-logger\')"* ]]\n'
         '  if [[ "$server_version" == "2.28.0" ]]; then\n'
         '    printf "TypeError: unexpected keyword argument registry\\n" >&2\n'
         "    exit 1\n"
@@ -706,11 +749,14 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
     script_path = _rewrite_jupyter_script(JUPYTER_SCRIPT_PATH, temp_root)
     env = dict(os.environ)
     env["HAILSTACK_COMMAND_LOG"] = str(command_log)
+    env["HAILSTACK_DECORATOR_STATE"] = str(decorator_state)
+    env["HAILSTACK_IPYTHON_STATE"] = str(ipython_state)
     env["HAILSTACK_JSONSCHEMA_STATE"] = str(jsonschema_state)
     env["HAILSTACK_JUPYTERLAB_STATE"] = str(jupyterlab_state)
     env["HAILSTACK_JUPYTER_SERVER_STATE"] = str(jupyter_server_state)
     env["HAILSTACK_JUPYTERLAB_SERVER_STATE"] = str(jupyterlab_server_state)
     env["HAILSTACK_JUPYTER_EVENTS_STATE"] = str(jupyter_events_state)
+    env["HAILSTACK_PYTHON_JSON_LOGGER_STATE"] = str(python_json_logger_state)
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
 
     result = subprocess.run(
@@ -723,11 +769,14 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+    assert decorator_state.read_text(encoding="utf-8") == "4.4.2"
+    assert ipython_state.read_text(encoding="utf-8") == "8.39.0"
     assert jupyterlab_state.read_text(encoding="utf-8") == "3.5.3"
     assert jupyter_server_state.read_text(encoding="utf-8") == "2.10.0"
     assert jupyterlab_server_state.read_text(encoding="utf-8") == "2.16.6"
     assert jupyter_events_state.read_text(encoding="utf-8") == "0.6.3"
     assert jsonschema_state.read_text(encoding="utf-8") == "3.2.0"
+    assert python_json_logger_state.read_text(encoding="utf-8") == "2.0.7"
     commands = command_log.read_text(encoding="utf-8").splitlines()
 
     assert any(
@@ -738,6 +787,9 @@ def test_o2_jupyter_script_pins_compatible_dependency_set_before_validation(
         and "jupyterlab-server==2.16.6" in line
         and "jupyter-events==0.6.3" in line
         and "jsonschema==3.2.0" in line
+        and "decorator==4.4.2" in line
+        and "ipython==8.39.0" in line
+        and "python-json-logger==2.0.7" in line
         for line in commands
     )
     assert any(line == "python -m pip check" for line in commands)
