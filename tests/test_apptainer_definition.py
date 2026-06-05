@@ -141,6 +141,22 @@ def test_m1_acceptance_3_sif_contains_pulumi_packer_and_ansible_executables() ->
     )
 
 
+def test_apptainer_installs_supported_pulumi_cli_version() -> None:
+    """Pin the container Pulumi CLI to the supported Ceph-compatible version."""
+    from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+
+    definition = _read_definition()
+    post_section = _section(definition, "post")
+
+    assert SUPPORTED_PULUMI_CLI_VERSION == "3.226.0"
+    assert (
+        "from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION"
+        in post_section
+    )
+    assert 'sh -s -- --version "${PULUMI_VERSION}"' in post_section
+    assert "curl -fsSL https://get.pulumi.com | sh\n" not in post_section
+
+
 def test_m1_acceptance_5_sif_contains_openstack_cli_for_create() -> None:
     """Install the OpenStack CLI inside the container for create preflight."""
     definition = _read_definition()

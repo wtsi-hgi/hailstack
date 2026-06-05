@@ -31,7 +31,7 @@ from typing import cast
 import pytest
 
 from hailstack.config import Bundle, ClusterConfig
-from hailstack.errors import PulumiError
+from hailstack.errors import PulumiError, S3Error
 from hailstack.pulumi import stack as stack_module
 
 
@@ -418,6 +418,44 @@ def test_backend_access_normalizes_bare_ceph_endpoint_and_defaults_region(
     ]
     assert captured_envs[0]["AWS_REGION"] == "us-east-1"
     assert captured_envs[0]["AWS_DEFAULT_REGION"] == "us-east-1"
+
+
+def test_backend_access_checksum_mismatch_hints_supported_pulumi_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explain known Ceph checksum mismatches with the supported Pulumi version."""
+    from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del args, capture_output, check, cwd, env, text
+        return SimpleNamespace(
+            returncode=1,
+            stderr=(
+                "error: failed to write .pulumi/meta.yaml: PutObject: "
+                "XAmzContentSHA256Mismatch"
+            ),
+            stdout="",
+        )
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    with pytest.raises(S3Error) as exc_info:
+        stack_module.AutomationStackRunner().check_backend_access(
+            _config(endpoint="https://cog.sanger.ac.uk/")
+        )
+
+    message = str(exc_info.value)
+    assert "XAmzContentSHA256Mismatch" in message
+    assert f"Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}" in message
+    assert "newer Pulumi CLI versions may fail" in message
 
 
 def test_pulumi_env_uses_caller_s3_region(

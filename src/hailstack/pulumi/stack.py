@@ -37,8 +37,10 @@ from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import PulumiError, S3Error
 from hailstack.pulumi.resources import create_cluster_resources
 from hailstack.runtime_paths import RUNTIME_WORK_DIR, runtime_work_dir
+from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
 
 REPOSITORY_ROOT = RUNTIME_WORK_DIR
+S3_CHECKSUM_MISMATCH_ERROR = "XAmzContentSHA256Mismatch"
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class AutomationStackRunner:
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            detail = _add_supported_pulumi_hint(detail)
             endpoint = config.ceph_s3.endpoint.removeprefix("https://").removeprefix(
                 "http://"
             )
@@ -364,6 +367,17 @@ def _set_default_s3_region(env: dict[str, str]) -> None:
         env["AWS_DEFAULT_REGION"] = region
 
 
+def _add_supported_pulumi_hint(detail: str) -> str:
+    """Add a supported-version hint for known Ceph checksum failures."""
+    if S3_CHECKSUM_MISMATCH_ERROR not in detail:
+        return detail
+    hint = (
+        f"Use Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}; newer Pulumi CLI versions "
+        "may fail this Ceph backend with checksum mismatch."
+    )
+    return f"{detail} Hint: {hint}"
+
+
 def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
     """Return whether destroy must rebuild the Pulumi program."""
     floating_ip = getattr(config.cluster, "floating_ip", "")
@@ -372,4 +386,9 @@ def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
     )
 
 
-__all__ = ["AutomationStackRunner", "CreateResult", "REPOSITORY_ROOT"]
+__all__ = [
+    "AutomationStackRunner",
+    "CreateResult",
+    "REPOSITORY_ROOT",
+    "SUPPORTED_PULUMI_CLI_VERSION",
+]
