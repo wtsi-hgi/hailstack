@@ -14,9 +14,9 @@ hailstack_resolve_java_home() {
 		return 0
 	fi
 
-	if java_bin="$(command -v javac 2>/dev/null)"; then
+	if java_bin="$(command -v java 2>/dev/null)"; then
 		:
-	elif java_bin="$(command -v java 2>/dev/null)"; then
+	elif java_bin="$(command -v javac 2>/dev/null)"; then
 		:
 	else
 		printf '[hailstack] unable to find java or javac on PATH while configuring Hadoop\n' >&2

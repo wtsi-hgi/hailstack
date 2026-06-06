@@ -1424,6 +1424,52 @@ def test_create_logs_progress_stages_to_stderr(
     assert "cluster ready" in result.stderr
 
 
+def test_create_logs_preflight_warnings_to_stderr(
+    command_matrix: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface non-fatal pre-flight warnings from the validation result."""
+    del command_matrix
+    config_path = _write_config(tmp_path / "create.toml")
+    fake_runner = FakePulumiRunner()
+    _install_fakes(monkeypatch, FakeOpenStackClient(), fake_runner)
+
+    def fake_run_preflight_validation(
+        config: object,
+        bundle: object,
+        client: object,
+        *,
+        expected_attached_floating_ip: str | None = None,
+        current_stack_outputs: Mapping[str, object] | None = None,
+        skip_backend_dependent_checks: bool = False,
+    ) -> create_module.PreflightValidationResult:
+        del (
+            config,
+            bundle,
+            client,
+            expected_attached_floating_ip,
+            current_stack_outputs,
+            skip_backend_dependent_checks,
+        )
+        return create_module.PreflightValidationResult(
+            image_id="image-from-warning-test",
+            warnings=["quota check deferred"],
+        )
+
+    monkeypatch.setattr(
+        create_module,
+        "_run_preflight_validation",
+        fake_run_preflight_validation,
+    )
+
+    result = runner.invoke(app, ["create", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "pre-flight warning: quota check deferred" in result.stderr
+    assert fake_runner.up_image_ids == ["image-from-warning-test"]
+
+
 def test_create_compute_quota_error_names_exceeded_quota(
     command_matrix: Path,
     tmp_path: Path,

@@ -692,10 +692,10 @@ def _optional_value_from_any(
 def get_create_logger() -> logging.Logger:
     """Return a dedicated stderr logger for create progress messages."""
     logger = logging.getLogger("hailstack.create")
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
+    logger.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
@@ -1128,6 +1128,8 @@ def create_command(
         ),
         current_stack_outputs=current_outputs,
     )
+    for warning in preflight_result.warnings:
+        logger.warning("pre-flight warning: %s", warning)
     logger.info("pre-flight passed")
 
     if dry_run:

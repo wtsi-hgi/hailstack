@@ -33,6 +33,12 @@ from hailstack import runtime_paths as runtime_paths_module
 from hailstack.cli.main import app
 
 runner = CliRunner()
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(value: str) -> str:
+    """Remove ANSI control sequences from Rich-rendered help output."""
+    return ANSI_ESCAPE_PATTERN.sub("", value)
 
 
 def test_help_lists_all_commands() -> None:
@@ -73,14 +79,16 @@ def test_create_help_shows_required_options() -> None:
     """Describe the expected create command options."""
     result = runner.invoke(app, ["create", "--help"])
 
+    stdout = _strip_ansi(result.stdout)
+
     assert result.exit_code == 0
-    assert "--config" in result.stdout
-    assert "Path to cluster configuration TOML file." in result.stdout
-    assert "--dry-run" in result.stdout
-    assert "Validate configuration without creating resources." in result.stdout
-    assert "--dotenv" in result.stdout
-    assert "Load environment variables from a .env file before" in result.stdout
-    assert "parsing config." in result.stdout
+    assert "--config" in stdout
+    assert "Path to cluster configuration TOML file." in stdout
+    assert "--dry-run" in stdout
+    assert "Validate configuration without creating resources." in stdout
+    assert "--dotenv" in stdout
+    assert "Load environment variables from a .env file before" in stdout
+    assert "parsing config." in stdout
 
 
 def test_runtime_paths_import_does_not_create_workspace_on_import(

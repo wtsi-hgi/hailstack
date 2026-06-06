@@ -286,6 +286,21 @@ def test_o2_hadoop_script_discovers_java_home_from_installed_java(
     """Discover JAVA_HOME for Hadoop when sudo -E does not provide it."""
     temp_root = tmp_path / "root"
     bin_dir, command_log = _stub_environment(tmp_path)
+    host_bin_dir = tmp_path / "host-bin"
+    host_java_home = tmp_path / "host-jvm" / "temurin-17-jdk-amd64"
+    host_bin_dir.mkdir()
+    (host_java_home / "bin").mkdir(parents=True)
+    (host_java_home / "bin" / "java").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+        encoding="utf-8",
+    )
+    (host_java_home / "bin" / "java").chmod(0o755)
+    (host_java_home / "bin" / "javac").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+        encoding="utf-8",
+    )
+    (host_java_home / "bin" / "javac").chmod(0o755)
+    (host_bin_dir / "javac").symlink_to(host_java_home / "bin" / "javac")
     (temp_root / "tmp").mkdir(parents=True)
     (temp_root / "opt").mkdir(parents=True)
     (temp_root / "etc" / "systemd" / "system").mkdir(parents=True)
@@ -367,7 +382,9 @@ def test_o2_hadoop_script_discovers_java_home_from_installed_java(
     env.update(MOCK_VERSION_ENV)
     env.pop("JAVA_HOME", None)
     env["HAILSTACK_COMMAND_LOG"] = str(command_log)
-    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["PATH"] = (
+        str(bin_dir) + os.pathsep + str(host_bin_dir) + os.pathsep + env.get("PATH", "")
+    )
 
     result = subprocess.run(
         ["bash", str(script_path)],
