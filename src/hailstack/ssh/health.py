@@ -24,6 +24,7 @@
 """Async SSH health probes for cluster services and resource usage."""
 
 import asyncio
+import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -220,17 +221,21 @@ async def _run_ssh_command(
         try:
             ssh_command = [
                 "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                *_SSH_HOST_KEY_OPTIONS,
+                *_ssh_probe_options(ssh_key_path),
             ]
-            if ssh_key_path is not None:
-                ssh_command.extend(["-i", str(ssh_key_path)])
             if host.jump_host:
-                ssh_command.extend(["-J", f"{ssh_username}@{host.jump_host}"])
-            ssh_command.extend([f"{ssh_username}@{host.address}", *command])
+                ssh_command.extend(
+                    [
+                        "-o",
+                        "ProxyCommand="
+                        + _jump_proxy_command(
+                            ssh_username=ssh_username,
+                            jump_host=host.jump_host,
+                            ssh_key_path=ssh_key_path,
+                        ),
+                    ]
+                )
+            ssh_command.extend([f"{ssh_username}@{host.address}", shlex.join(command)])
             process = await asyncio.create_subprocess_exec(
                 *ssh_command,
                 stdout=asyncio.subprocess.PIPE,
@@ -265,6 +270,38 @@ async def _run_ssh_command(
         return stdout
 
     raise AssertionError("SSH retry loop exhausted unexpectedly")
+
+
+def _ssh_probe_options(ssh_key_path: Path | None) -> list[str]:
+    """Build SSH options shared by direct and jump-proxy health probes."""
+    ssh_options = [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        *_SSH_HOST_KEY_OPTIONS,
+    ]
+    if ssh_key_path is not None:
+        ssh_options.extend(["-i", str(ssh_key_path)])
+    return ssh_options
+
+
+def _jump_proxy_command(
+    *,
+    ssh_username: str,
+    jump_host: str,
+    ssh_key_path: Path | None,
+) -> str:
+    """Build an explicit jump command with the same safe SSH probe options."""
+    return shlex.join(
+        [
+            "ssh",
+            *_ssh_probe_options(ssh_key_path),
+            "-W",
+            "%h:%p",
+            f"{ssh_username}@{jump_host}",
+        ]
+    )
 
 
 def _service_results_from_gather(

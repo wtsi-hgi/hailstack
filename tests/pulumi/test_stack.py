@@ -29,9 +29,10 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from pulumi import automation as auto
 
 from hailstack.config import Bundle, ClusterConfig
-from hailstack.errors import PulumiError
+from hailstack.errors import PulumiError, S3Error
 from hailstack.pulumi import stack as stack_module
 
 
@@ -43,6 +44,7 @@ class FakeAutoStack:
         self.preview_calls = 0
         self.preview_destroy_calls = 0
         self.destroy_calls = 0
+        self.up_calls = 0
         self.output_values: dict[str, object] = {}
 
     def preview(self, *, on_output: object) -> object:
@@ -62,6 +64,17 @@ class FakeAutoStack:
         assert remove is True
         self.destroy_calls += 1
 
+    def up(self, *, on_output: object) -> object:
+        """Return a fake create result with the required master IP output."""
+        del on_output
+        self.up_calls += 1
+        return SimpleNamespace(
+            stdout="created\n",
+            outputs={
+                "master_public_ip": SimpleNamespace(value="198.51.100.20"),
+            },
+        )
+
     def outputs(self) -> dict[str, object]:
         """Return fake stack outputs."""
         return {
@@ -70,7 +83,7 @@ class FakeAutoStack:
         }
 
 
-def _config() -> ClusterConfig:
+def _config(*, endpoint: str = "https://ceph.example.invalid") -> ClusterConfig:
     """Return the subset of config the runner needs for tests."""
     return cast(
         ClusterConfig,
@@ -78,13 +91,66 @@ def _config() -> ClusterConfig:
             cluster=SimpleNamespace(name="test-cluster"),
             ceph_s3=SimpleNamespace(
                 bucket="hailstack-state",
-                endpoint="https://ceph.example.invalid",
+                endpoint=endpoint,
                 access_key="state-access",
                 secret_key="state-secret",
             ),
             volumes=SimpleNamespace(preserve_on_destroy=False),
         ),
     )
+
+
+def _capture_new_stack_preview_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    """Return the Pulumi env passed to a first-time stack preview."""
+    fake_stack = FakeAutoStack()
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_create_stack(**kwargs: object) -> FakeAutoStack:
+        workspace_options = cast(auto.LocalWorkspaceOptions, kwargs["opts"])
+        captured_envs.append(cast(dict[str, str], workspace_options.env_vars))
+        return fake_stack
+
+    monkeypatch.setattr(stack_module.auto, "create_stack", fake_create_stack)
+
+    stack_module.AutomationStackRunner().preview(
+        _config(),
+        cast(Bundle, SimpleNamespace(id="bundle-id")),
+        stack_exists=False,
+    )
+
+    assert len(captured_envs) == 1
+    return captured_envs[0]
+
+
+def _capture_persisted_create_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    """Return the Pulumi env passed to a first-time persisted create."""
+    fake_stack = FakeAutoStack()
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_create_or_select_stack(**kwargs: object) -> FakeAutoStack:
+        workspace_options = cast(auto.LocalWorkspaceOptions, kwargs["opts"])
+        captured_envs.append(cast(dict[str, str], workspace_options.env_vars))
+        return fake_stack
+
+    monkeypatch.setattr(
+        stack_module.auto,
+        "create_or_select_stack",
+        fake_create_or_select_stack,
+    )
+
+    result = stack_module.AutomationStackRunner().up(
+        _config(),
+        cast(Bundle, SimpleNamespace(id="bundle-id")),
+    )
+
+    assert result.master_public_ip == "198.51.100.20"
+    assert fake_stack.up_calls == 1
+    assert len(captured_envs) == 1
+    return captured_envs[0]
 
 
 def test_preview_destroy_selects_existing_stack(
@@ -131,10 +197,11 @@ def test_preview_new_stack_allows_missing_runtime_secrets(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
     ) -> None:
-        del config, bundle, retain_created_volume
+        del config, bundle, image_id, retain_created_volume
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
 
     def fake_create_stack(**kwargs: object) -> FakeAutoStack:
@@ -160,6 +227,57 @@ def test_preview_new_stack_allows_missing_runtime_secrets(
     assert len(captured_program) == 1
     captured_program[0]()
     assert recorded_allow_missing_runtime_secrets == [True]
+
+
+def test_preview_new_stack_defaults_passphrase_for_ephemeral_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview first-time creates non-interactively with the local backend."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_persisted_create_defaults_passphrase_to_state_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create first-time persisted stacks without requiring manual Pulumi setup."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_persisted_create_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_preview_new_stack_preserves_explicit_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrases for first-time previews."""
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE", "caller-passphrase")
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == "caller-passphrase"
+
+
+def test_preview_new_stack_preserves_explicit_passphrase_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrase files for first-time previews."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE_FILE", "/tmp/caller-passphrase")
+
+    env = _capture_new_stack_preview_env(monkeypatch)
+
+    assert env["PULUMI_CONFIG_PASSPHRASE_FILE"] == "/tmp/caller-passphrase"
+    assert "PULUMI_CONFIG_PASSPHRASE" not in env
 
 
 def test_destroy_raises_clear_error_when_stack_is_missing(
@@ -191,11 +309,12 @@ def test_cleanup_failed_create_disables_volume_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
@@ -241,11 +360,12 @@ def test_destroy_uses_current_config_for_volume_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
@@ -302,11 +422,12 @@ def test_destroy_rehydrates_program_for_existing_floating_ip_retention(
         config: object,
         bundle: object,
         *,
+        image_id: str | None = None,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
         allow_missing_ssh_public_keys: bool = False,
     ) -> None:
-        del config, bundle
+        del config, bundle, image_id
         recorded_retain_created_volume.append(retain_created_volume)
         recorded_allow_missing_runtime_secrets.append(allow_missing_runtime_secrets)
         recorded_allow_missing_ssh_public_keys.append(allow_missing_ssh_public_keys)
@@ -377,6 +498,140 @@ def test_pulumi_env_preserves_explicit_pulumi_home(
     env = runner._pulumi_env(_config())
 
     assert env["PULUMI_HOME"] == "/tmp/custom-pulumi-home"
+
+
+def test_pulumi_env_defaults_passphrase_to_state_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the state secret as a stable default Pulumi passphrase."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == _config().ceph_s3.secret_key
+    assert "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+
+
+def test_pulumi_env_preserves_explicit_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrases for persisted stacks."""
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE", "caller-passphrase")
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE_FILE", raising=False)
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["PULUMI_CONFIG_PASSPHRASE"] == "caller-passphrase"
+
+
+def test_pulumi_env_preserves_explicit_passphrase_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect caller-provided Pulumi passphrase files for persisted stacks."""
+    monkeypatch.delenv("PULUMI_CONFIG_PASSPHRASE", raising=False)
+    monkeypatch.setenv("PULUMI_CONFIG_PASSPHRASE_FILE", "/tmp/caller-passphrase")
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["PULUMI_CONFIG_PASSPHRASE_FILE"] == "/tmp/caller-passphrase"
+    assert "PULUMI_CONFIG_PASSPHRASE" not in env
+
+
+def test_backend_access_normalizes_bare_ceph_endpoint_and_defaults_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login to documented bare Ceph endpoints with a valid S3 region."""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    captured_args: list[list[str]] = []
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del capture_output, check, cwd, text
+        captured_args.append(args)
+        captured_envs.append(env)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    stack_module.AutomationStackRunner().check_backend_access(
+        _config(endpoint="cog.sanger.ac.uk")
+    )
+
+    assert captured_args == [
+        [
+            "pulumi",
+            "login",
+            "--non-interactive",
+            "s3://hailstack-state?endpoint=https://cog.sanger.ac.uk",
+        ]
+    ]
+    assert captured_envs[0]["AWS_REGION"] == "us-east-1"
+    assert captured_envs[0]["AWS_DEFAULT_REGION"] == "us-east-1"
+
+
+def test_backend_access_checksum_mismatch_hints_supported_pulumi_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explain known Ceph checksum mismatches with the supported Pulumi version."""
+    from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del args, capture_output, check, cwd, env, text
+        return SimpleNamespace(
+            returncode=1,
+            stderr=(
+                "error: failed to write .pulumi/meta.yaml: PutObject: "
+                "XAmzContentSHA256Mismatch"
+            ),
+            stdout="",
+        )
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    with pytest.raises(S3Error) as exc_info:
+        stack_module.AutomationStackRunner().check_backend_access(
+            _config(endpoint="https://cog.sanger.ac.uk/")
+        )
+
+    message = str(exc_info.value)
+    assert "XAmzContentSHA256Mismatch" in message
+    assert f"Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}" in message
+    assert "newer Pulumi CLI versions may fail" in message
+
+
+def test_pulumi_env_uses_caller_s3_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Respect a caller-provided S3 backend region."""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-2")
+
+    runner = stack_module.AutomationStackRunner(work_dir=stack_module.REPOSITORY_ROOT)
+    env = runner._pulumi_env(_config())
+
+    assert env["AWS_REGION"] == "eu-west-2"
+    assert env["AWS_DEFAULT_REGION"] == "eu-west-2"
 
 
 def test_cli_env_matches_automation_env(monkeypatch: pytest.MonkeyPatch) -> None:

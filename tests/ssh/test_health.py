@@ -24,6 +24,7 @@
 """Acceptance tests for the H2 SSH health probe module."""
 
 import asyncio
+import shlex
 from pathlib import Path
 
 import pytest
@@ -271,6 +272,113 @@ def test_run_ssh_command_passes_explicit_ssh_key(
     ]
     assert "-i" in captured_args
     assert str(ssh_key_path) in captured_args
+
+
+def test_run_ssh_command_uses_safe_proxy_command_for_jump_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Carry safe SSH options through the master jump connection."""
+    captured_args: list[str] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"ok\n", b""
+
+    async def fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        del kwargs
+        captured_args.extend(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    ssh_key_path = tmp_path / "cluster key"
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(
+                name="worker-01",
+                address="10.0.1.20",
+                jump_host="198.51.100.10",
+            ),
+            "ubuntu",
+            ("true",),
+            ssh_key_path=ssh_key_path,
+        )
+    )
+
+    proxy_option = next(arg for arg in captured_args if arg.startswith("ProxyCommand="))
+    proxy_command = proxy_option.removeprefix("ProxyCommand=")
+    assert result == "ok\n"
+    assert "-J" not in captured_args
+    assert shlex.split(proxy_command) == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-i",
+        str(ssh_key_path),
+        "-W",
+        "%h:%p",
+        "ubuntu@198.51.100.10",
+    ]
+
+
+def test_run_ssh_command_quotes_complex_remote_commands_as_single_ssh_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve remote command argument boundaries through OpenSSH."""
+    captured_args: list[object] = []
+    remote_command = (
+        "sh",
+        "-lc",
+        "top -bn1 | awk '/^%Cpu/ {print 100 - $8}' && "
+        "free | awk '/Mem:/ {print ($3/$2)*100}' && "
+        "df -P / | awk 'NR==2 {gsub(/%/, \"\", $5); print $5}'",
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"23\n45.5\n12\n", b""
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        del kwargs
+        captured_args.extend(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        health_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    result = asyncio.run(
+        health_module._run_ssh_command(  # pyright: ignore[reportPrivateUsage]
+            health_module.HealthProbeTarget(name="master", address="master"),
+            "ubuntu",
+            remote_command,
+        )
+    )
+
+    destination_index = captured_args.index("ubuntu@master")
+    remote_args = captured_args[destination_index + 1 :]
+    assert result == "23\n45.5\n12\n"
+    assert remote_args == [shlex.join(remote_command)]
 
 
 def test_run_ssh_command_allows_expected_non_zero_exit_codes(

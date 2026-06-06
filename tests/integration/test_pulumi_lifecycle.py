@@ -41,6 +41,7 @@ from hailstack.pulumi import stack as stack_module
 runner = CliRunner()
 
 EXPECTED_CREATE_RESOURCE_COUNT = 22
+RUNNER_DEFAULT_PUBLIC_KEY = "ssh-rsa DEFAULT runner@test"
 
 
 class ResourceRecord(TypedDict):
@@ -133,7 +134,7 @@ class FakeOpenStackClient:
 
     def get_image(self, name: str) -> object | None:
         """Return a truthy image record when the image exists."""
-        return {"name": name} if name in self.images else None
+        return {"id": f"{name}-id", "name": name} if name in self.images else None
 
     def get_flavour(self, name: str) -> FlavorDetails | None:
         """Return flavour details when the flavour exists."""
@@ -520,6 +521,20 @@ def _write_config(path: Path) -> Path:
     return path
 
 
+def _install_default_public_key(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+) -> None:
+    """Point Path.home at a temp home containing a default public key."""
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (ssh_dir / "id_rsa.pub").write_text(
+        RUNNER_DEFAULT_PUBLIC_KEY + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
 @pytest.fixture
 def lifecycle_environment(
     tmp_path: Path,
@@ -530,6 +545,7 @@ def lifecycle_environment(
     config_path = _write_config(tmp_path / "cluster.toml")
     environment = FakeAutomationEnvironment()
     environment.install(monkeypatch)
+    _install_default_public_key(monkeypatch, tmp_path / "home")
     monkeypatch.setattr(create_module, "DEFAULT_COMPATIBILITY_MATRIX_PATH", matrix_path)
     monkeypatch.setattr(
         create_module,

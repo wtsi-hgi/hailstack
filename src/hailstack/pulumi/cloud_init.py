@@ -25,15 +25,21 @@
 
 import os
 from collections.abc import Sequence
+from email import policy
+from email.message import EmailMessage
+from hashlib import sha256
 from shlex import quote
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+import yaml
+
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import ConfigError
 
-HADOOP_CONF_DIR = "/etc/hadoop/conf"
+HADOOP_CONF_DIR = "/opt/hadoop/etc/hadoop"
 SPARK_CONF_DIR = "/etc/spark/conf"
+SPARK_RUNTIME_CONF_DIR = "/opt/spark/conf"
 NGINX_SITE_PATH = "/etc/nginx/sites-enabled/hailstack.conf"
 HTPASSWD_PATH = "/etc/nginx/.hailstack-htpasswd"
 SSL_CERT_PATH = "/etc/nginx/ssl/hailstack.crt"
@@ -41,6 +47,8 @@ SSL_KEY_PATH = "/etc/nginx/ssl/hailstack.key"
 VOLUME_KEY_PATH = "/etc/hailstack/volume.key"
 VOLUME_DEVICE_PATH = "/etc/hailstack/volume-device"
 VOLUME_UUID_PATH = "/etc/hailstack/volume-uuid"
+BAKED_LUSTRE_SERVICE = "mountLustre.service"
+BAKED_METRICBEAT_OPENSTACK_SETUP_SERVICE = "metricbeat-openstack-setup.service"
 BASE_VENV_PATH = "/opt/hailstack/base-venv"
 OVERLAY_VENV_PATH = "/opt/hailstack/overlay-venv"
 RUNTIME_PYTHON_PATH = f"{OVERLAY_VENV_PATH}/bin/python"
@@ -48,6 +56,7 @@ NETDATA_DIR = "/etc/netdata"
 NETDATA_STREAM_PATH = f"{NETDATA_DIR}/stream.conf"
 NETDATA_GO_D_PATH = f"{NETDATA_DIR}/go.d"
 NETDATA_HEALTH_D_PATH = f"{NETDATA_DIR}/health.d"
+CLOUD_INIT_EMAIL_POLICY = policy.default.clone(linesep="\n")
 
 
 def _env_var_or_placeholder(
@@ -86,11 +95,20 @@ def _here_doc(target_path: str, marker: str, content: str) -> list[str]:
     return [f"cat <<'{marker}' > {target_path}", content.rstrip(), marker]
 
 
-def _hosts_content(config: ClusterConfig, worker_ips: Sequence[str]) -> str:
+def _hosts_content(
+    config: ClusterConfig,
+    worker_ips: Sequence[str],
+    master_private_ip: str | None = None,
+) -> str:
     """Render the /etc/hosts payload for the master node."""
+    master_alias_ip = (
+        master_private_ip.strip() if master_private_ip is not None else "127.0.1.1"
+    )
+    if not master_alias_ip:
+        master_alias_ip = "127.0.1.1"
     host_lines = [
         "127.0.0.1 localhost",
-        f"127.0.1.1 master {config.cluster.name}-master",
+        f"{master_alias_ip} master {config.cluster.name}-master",
     ]
     for index, worker_ip in enumerate(worker_ips, start=1):
         host_lines.append(
@@ -132,6 +150,58 @@ def _worker_hosts_content(
 def _authorized_keys_content(config: ClusterConfig) -> str:
     """Render the login user's authorized_keys file content."""
     return "\n".join(config.ssh_keys.public_keys) + "\n"
+
+
+def _cloud_config(config: ClusterConfig) -> str:
+    """Render early boot and config-stage cloud-init settings."""
+    payload = {
+        "package_update": False,
+        "package_upgrade": False,
+        "package_reboot_if_required": False,
+        "bootcmd": _first_boot_cleanup_commands(config),
+        "users": [
+            "default",
+            {
+                "name": config.cluster.ssh_username,
+                "ssh_authorized_keys": list(config.ssh_keys.public_keys),
+            },
+        ],
+    }
+    return "#cloud-config\n" + yaml.safe_dump(
+        payload,
+        default_flow_style=False,
+        sort_keys=False,
+        width=1_000_000,
+    )
+
+
+def _cloud_init_boundary(parts: Sequence[str]) -> str:
+    """Return a deterministic MIME boundary for a rendered cloud-init payload."""
+    digest = sha256()
+    for part in parts:
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return f"===============hailstack-cloud-init-{digest.hexdigest()[:32]}=="
+
+
+def _text_part(content: str, subtype: str) -> EmailMessage:
+    """Return a text MIME part with readable ASCII payloads where possible."""
+    part = EmailMessage(policy=CLOUD_INIT_EMAIL_POLICY)
+    if content.isascii():
+        part.set_content(content, subtype=subtype, cte="7bit")
+    else:
+        part.set_content(content, subtype=subtype)
+    return part
+
+
+def _cloud_init_multipart(cloud_config: str, shell_script: str) -> str:
+    """Render cloud-config and shellscript payloads as MIME user-data."""
+    message = EmailMessage(policy=CLOUD_INIT_EMAIL_POLICY)
+    message.set_type("multipart/mixed")
+    message.set_boundary(_cloud_init_boundary([cloud_config, shell_script]))
+    message.attach(_text_part(cloud_config, "cloud-config"))
+    message.attach(_text_part(shell_script, "x-shellscript"))
+    return message.as_string()
 
 
 def _xml_property(name: str, value: str) -> str:
@@ -196,6 +266,20 @@ def _spark_defaults_content(config: ClusterConfig, bundle: Bundle) -> str:
         )
         + "\n"
     )
+
+
+def _spark_defaults_commands(config: ClusterConfig, bundle: Bundle) -> list[str]:
+    """Render Spark defaults commands visible to Spark's packaged scripts."""
+    managed_path = f"{SPARK_CONF_DIR}/spark-defaults.conf"
+    runtime_path = f"{SPARK_RUNTIME_CONF_DIR}/spark-defaults.conf"
+    return [
+        *_here_doc(
+            managed_path,
+            "EOF_SPARK_DEFAULTS",
+            _spark_defaults_content(config, bundle),
+        ),
+        f"ln -sfn {managed_path} {runtime_path}",
+    ]
 
 
 def _jupyter_config_content(web_password: str) -> str:
@@ -511,19 +595,82 @@ def _volume_commands(
     return commands
 
 
+def _configured_lustre_fstab_command(config: ClusterConfig) -> str | None:
+    """Render the configured Lustre fstab append command, when enabled."""
+    if not config.cluster.lustre_network.strip():
+        return None
+    fstab_line = (
+        f"{config.cluster.lustre_mount_target} /lustre lustre defaults,_netdev 0 0"
+    )
+    quoted_line = quote(fstab_line)
+    return (
+        f"grep -Fxq -- {quoted_line} /etc/fstab || "
+        f"printf '%s\\n' {quoted_line} >> /etc/fstab"
+    )
+
+
+def _baked_service_cleanup_commands(service: str) -> list[str]:
+    """Render commands that stop and mask a baked systemd service."""
+    return [
+        f"systemctl stop --no-block {service} || true",
+        f"systemctl kill {service} || true",
+        f"systemctl disable {service} || true",
+        f"rm -f /etc/systemd/system/{service}",
+        "systemctl daemon-reload || true",
+        f"systemctl mask --force {service} || true",
+    ]
+
+
+def _baked_lustre_cleanup_commands(config: ClusterConfig) -> list[str]:
+    """Render commands that neutralize baked site-wide Lustre boot behavior."""
+    commands = [
+        *_baked_service_cleanup_commands(BAKED_LUSTRE_SERVICE),
+        "awk '$3 != \"lustre\" { print }' /etc/fstab > /etc/fstab.hailstack "
+        "&& cat /etc/fstab.hailstack > /etc/fstab "
+        "&& rm -f /etc/fstab.hailstack",
+    ]
+    configured_lustre = _configured_lustre_fstab_command(config)
+    if configured_lustre is not None:
+        commands.append(configured_lustre)
+    commands.append("systemctl daemon-reload || true")
+    return commands
+
+
+def _first_boot_cleanup_commands(config: ClusterConfig) -> list[str]:
+    """Render early cleanup for baked services that can block cloud-init final."""
+    return [
+        *_baked_service_cleanup_commands(BAKED_METRICBEAT_OPENSTACK_SETUP_SERVICE),
+        *_baked_lustre_cleanup_commands(config),
+    ]
+
+
 def _lustre_commands(config: ClusterConfig) -> list[str]:
     """Render optional Lustre mount commands."""
     if not config.cluster.lustre_network.strip():
         return []
     return [
+        *_baked_lustre_cleanup_commands(config),
         "install -d -m 0755 /lustre",
-        "grep -q '^"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre ' /etc/fstab || echo '"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre defaults,_netdev 0 0' >> /etc/fstab",
-        "mountpoint -q /lustre || mount /lustre",
+        _configured_lustre_mount_command(),
     ]
+
+
+def _configured_lustre_mount_command() -> str:
+    """Render a bounded configured Lustre mount attempt."""
+    return (
+        "if mountpoint -q /lustre; then\n"
+        "  echo 'Hailstack Lustre mount already active at /lustre'\n"
+        "else\n"
+        "  echo 'Hailstack attempting configured Lustre mount at /lustre with "
+        "120 second timeout'\n"
+        "  if timeout --kill-after=15s 120s mount /lustre; then\n"
+        "    echo 'Hailstack mounted configured Lustre target at /lustre'\n"
+        "  else\n"
+        "    echo 'Hailstack warning: configured Lustre target did not mount "
+        "within 120 seconds or failed; continuing cloud-init final setup' >&2\n"
+        "  fi\n"
+        "fi"
+    )
 
 
 def _worker_volume_commands(config: ClusterConfig, master_ip: str) -> list[str]:
@@ -587,7 +734,7 @@ def _worker_netdata_commands(
 
 def _worker_install_directories(config: ClusterConfig) -> str:
     """Render worker install directories, omitting Netdata paths when disabled."""
-    directories = [HADOOP_CONF_DIR, SPARK_CONF_DIR]
+    directories = [HADOOP_CONF_DIR, SPARK_CONF_DIR, SPARK_RUNTIME_CONF_DIR]
     if _netdata_enabled(config):
         directories.insert(0, NETDATA_DIR)
     return "install -d -m 0755 " + " ".join(directories)
@@ -603,6 +750,7 @@ def _master_install_directories(config: ClusterConfig) -> str:
         "/etc/nginx/ssl",
         HADOOP_CONF_DIR,
         SPARK_CONF_DIR,
+        SPARK_RUNTIME_CONF_DIR,
         "/etc/jupyter",
         "/etc/exports.d",
     ]
@@ -617,10 +765,11 @@ def generate_master_cloud_init(
     worker_ips: list[str],
     netdata_api_key: str | None = None,
     *,
+    master_private_ip: str | None = None,
     attached_volume_id: str | None = None,
     allow_missing_runtime_secrets: bool = False,
 ) -> str:
-    """Return cloud-init user-data bash script for the master."""
+    """Return cloud-init user-data for the master."""
     web_password = _env_var_or_placeholder(
         "HAILSTACK_WEB_PASSWORD",
         "HAILSTACK_WEB_PASSWORD required",
@@ -646,7 +795,11 @@ def generate_master_cloud_init(
         f"# Hailstack bundle {bundle.id}",
         _master_install_directories(config),
         f"install -d -m 0700 /home/{username}/.ssh",
-        *_here_doc("/etc/hosts", "EOF_HOSTS", _hosts_content(config, worker_ips)),
+        *_here_doc(
+            "/etc/hosts",
+            "EOF_HOSTS",
+            _hosts_content(config, worker_ips, master_private_ip),
+        ),
         *_here_doc(
             f"/home/{username}/.ssh/authorized_keys",
             "EOF_AUTH_KEYS",
@@ -664,11 +817,7 @@ def generate_master_cloud_init(
             "EOF_HDFS_SITE",
             _hdfs_site_content(config),
         ),
-        *_here_doc(
-            f"{SPARK_CONF_DIR}/spark-defaults.conf",
-            "EOF_SPARK_DEFAULTS",
-            _spark_defaults_content(config, bundle),
-        ),
+        *_spark_defaults_commands(config, bundle),
         *_here_doc(
             "/etc/jupyter/jupyter_server_config.py",
             "EOF_JUPYTER_CONFIG",
@@ -686,7 +835,8 @@ def generate_master_cloud_init(
         *_extras_commands(config),
         *_service_commands(config),
     ]
-    return "\n".join(commands) + "\n"
+    shell_script = "\n".join(commands) + "\n"
+    return _cloud_init_multipart(_cloud_config(config), shell_script)
 
 
 def generate_worker_cloud_init(
@@ -697,7 +847,7 @@ def generate_worker_cloud_init(
     worker_ips: Sequence[str] | None = None,
     netdata_api_key: str | None = None,
 ) -> str:
-    """Return cloud-init user-data bash script for a worker."""
+    """Return cloud-init user-data for a worker."""
     resolved_netdata_api_key = _resolve_netdata_api_key(netdata_api_key)
     username = config.cluster.ssh_username
     commands = [
@@ -728,11 +878,7 @@ def generate_worker_cloud_init(
             "EOF_HDFS_SITE",
             _worker_hdfs_site_content(config),
         ),
-        *_here_doc(
-            f"{SPARK_CONF_DIR}/spark-defaults.conf",
-            "EOF_SPARK_DEFAULTS",
-            _spark_defaults_content(config, bundle),
-        ),
+        *_spark_defaults_commands(config, bundle),
         *_worker_spark_commands(),
         *_worker_netdata_commands(config, master_ip, resolved_netdata_api_key),
         *_worker_volume_commands(config, master_ip),
@@ -742,7 +888,8 @@ def generate_worker_cloud_init(
         *_extras_commands(config),
         *_worker_service_commands(config),
     ]
-    return "\n".join(commands) + "\n"
+    shell_script = "\n".join(commands) + "\n"
+    return _cloud_init_multipart(_cloud_config(config), shell_script)
 
 
 __all__ = ["generate_master_cloud_init", "generate_worker_cloud_init"]

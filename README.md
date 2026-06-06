@@ -30,13 +30,15 @@ The two S3 credential pairs serve different purposes and usually point at differ
 
 They can be the same key if you want, but keeping them separate lets you rotate them independently and grant the cluster's data access more broadly than the CLI's state access.
 
+Hailstack automatically provides a stable Pulumi stack passphrase from the configured state-bucket credentials for normal `create`, `destroy`, and preview operations. Most users do not need to set `PULUMI_CONFIG_PASSPHRASE` or `PULUMI_CONFIG_PASSPHRASE_FILE`; those variables are only for sites that intentionally manage Pulumi secrets encryption themselves.
+
 ## Installation
 
 There is currently no published `hailstack.sif` artifact. Pick one of the two installation paths below.
 
 ### Option A — Run from a Python virtual environment (no Apptainer)
 
-This path is the fastest if `pulumi`, `packer`, `ansible-playbook`, and `openstack` are already installed on your host (or you are happy to install them yourself).
+This path is the fastest if `pulumi`, `packer`, `ansible-playbook`, and `openstack` are already installed on your host (or you are happy to install them yourself). Hailstack supports Pulumi CLI `3.226.0`; newer Pulumi CLI releases may fail against the documented Ceph S3 backend with `XAmzContentSHA256Mismatch`.
 
 1. Make sure the external tools are on `PATH`. Adjust the example below to match where your site keeps them, or install them from upstream:
 
@@ -47,10 +49,15 @@ This path is the fastest if `pulumi`, `packer`, `ansible-playbook`, and `opensta
    export PATH="/path/to/pulumi:$PATH"
    export PATH="/path/to/ansible/venv/bin:$PATH"
 
+   # If Pulumi is not already site-managed, install the supported CLI version.
+   PULUMI_VERSION=3.226.0
+   curl -fsSL https://get.pulumi.com | sh -s -- --version "${PULUMI_VERSION}"
+   export PATH="$HOME/.pulumi/bin:$PATH"
+
    # Sanity check
    python3.14 --version
    packer --version
-   pulumi version
+   pulumi version  # v3.226.0
    ansible-playbook --version
    openstack --version   # from the python-openstackclient package
    ```
@@ -119,7 +126,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    cp example-config.toml my-cluster.toml
    ```
 
-   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Put the contents of your normal SSH public key file, for example `~/.ssh/id_ed25519.pub`, in `ssh_keys.public_keys` so you can SSH to created nodes later. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If your runner cannot SSH directly to instances on that network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
+   Edit `my-cluster.toml` and at minimum set `cluster.name`, `cluster.master_flavour`, `cluster.network_name`, `cluster.bundle`, `ceph_s3.endpoint`, `ceph_s3.bucket`, and `ssh_keys.public_keys`. Put the contents of your normal SSH public key file, for example `~/.ssh/id_ed25519.pub`, in `ssh_keys.public_keys` so you can SSH to created nodes later. During `create`, Hailstack also appends readable default OpenSSH public key files such as `~/.ssh/id_ed25519.pub` and `~/.ssh/id_rsa.pub` to every node; if none are readable, it fails before creating resources with guidance to create or regenerate the matching `.pub` file. Hailstack does not read private keys. `cluster.network_name` is the OpenStack network name Hailstack should use; Hailstack resolves it to a UUID when Packer needs one. If `cluster.lustre_network` is set, `build-image` resolves and attaches it to the temporary Packer instance too. If your runner cannot SSH directly to instances on the management network, set `cluster.floating_ip_pool` to the public/external pool used for cluster access. Review every section listed in [Configuration Reference](#configuration-reference) before running `create`.
 
    If you installed Hailstack via the SIF and do not have the repository checked out, copy `example-config.toml` out of the image first:
 
@@ -143,7 +150,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    chmod 600 .env
    ```
 
-4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. SSH must be reachable from the runner either through that network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`.
+4. Build the OpenStack image for your chosen bundle. You only need to repeat this when you switch to a bundle that does not already have a matching `hailstack-<bundle-id>` image in Glance, or when you change the base image. Packer boots a temporary instance on `cluster.network_name`; Hailstack resolves that network name to the UUID required by Packer before launching the build. If `cluster.lustre_network` is set, the temporary instance is attached to that resolved network as a second interface. SSH must be reachable from the runner either through the management network or through a floating IP pool. When `[packer].floating_ip_pool` is blank, `build-image` reuses `cluster.floating_ip_pool`. Floating-IP builds create a temporary management port so SSH ingress is applied only to that interface, then delete that port and the temporary SSH security group after Packer exits.
 
    ```bash
    hailstack build-image --config my-cluster.toml --dotenv .env
@@ -191,7 +198,7 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 | `cluster.master_flavour`      | OpenStack flavour for the master VM.                                                                                | `string`  | required                                       | `m2.2xlarge`                   |
 | `cluster.worker_flavour`      | OpenStack flavour for workers. If omitted, Hailstack reuses `cluster.master_flavour`.                               | `string`  | `""` then resolved to `cluster.master_flavour` | `m2.2xlarge`                   |
 | `cluster.network_name`        | Required OpenStack network name for the management interface on all nodes and for Packer image-build instances. Hailstack resolves names to the UUID Packer requires; existing UUID values are also accepted. | `string`  | `cloudforms_network`                           | `cloudforms_network`           |
-| `cluster.lustre_network`      | Optional second network name added to every node for Lustre access.                                                 | `string`  | `""`                                           | `lustre_network`               |
+| `cluster.lustre_network`      | Optional second network name added to every node and Packer image-build instance for Lustre access.                 | `string`  | `""`                                           | `lustre_network`               |
 | `cluster.lustre_mount_target` | Lustre mount target written to `/etc/fstab` when `cluster.lustre_network` is set.                                   | `string`  | `10.1.0.1@tcp:/fsx`                            | `192.0.2.10@tcp:/fsx`          |
 | `cluster.ssh_username`        | Login user used by SSH-based commands and cloud-init paths.                                                         | `string`  | `ubuntu`                                       | `ubuntu`                       |
 | `cluster.monitoring`          | Monitoring mode. Only `netdata` and `none` are accepted.                                                            | `string`  | `netdata`                                      | `netdata`                      |
@@ -202,7 +209,8 @@ The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string val
 
 For secure Lustre, both values are site-specific. `cluster.lustre_network`
 must be the OpenStack network that can reach Lustre; Hailstack adds a second
-Neutron port on that network to every node. With OpenStack credentials loaded,
+Neutron port on that network to every cluster node and attaches temporary
+Packer build instances to that network too. With OpenStack credentials loaded,
 list the networks your project can see:
 
 ```bash
@@ -237,6 +245,7 @@ is the `cluster.lustre_mount_target` value.
 | `packer.base_image`       | Source image name that Packer should boot before provisioning the Hailstack image.                                                                                                 | `string` | required when `[packer]` is present | `ubuntu-22.04` |
 | `packer.flavour`          | OpenStack flavour used during the image build.                                                                                                                                     | `string` | `m2.medium`                         | `m2.medium`    |
 | `packer.floating_ip_pool` | Optional image-build override for the floating IP pool used by Packer. If blank, `build-image` uses `cluster.floating_ip_pool`; leave both blank only when the runner can SSH directly to `cluster.network_name`. | `string` | `""`                                | `public`       |
+| `packer.gnomad_methods_version` | Python `gnomad` methods package version installed into the image; this is separate from the gnomAD data release in the compatibility bundle.                                | `string` | `0.8.2`                             | `0.8.2`        |
 
 ### `[volumes]`
 
@@ -269,7 +278,7 @@ is the `cluster.lustre_mount_target` value.
 
 | Field                  | Description                                                                                                                                                     | Type           | Default                                              | Example                                                        |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------- | -------------------------------------------------------------- |
-| `ssh_keys.public_keys` | Public keys written into `authorized_keys` on all nodes. Paste the contents of your normal public key file, such as `~/.ssh/id_ed25519.pub`. At least one non-empty key is required. The first key is also used for the OpenStack keypair resource. | `list[string]` | empty list, but validation requires at least one key | `["ssh-ed25519 AAAA... user@host1", "ssh-rsa BBBB... user@host2"]` |
+| `ssh_keys.public_keys` | Public keys written into `authorized_keys` on all nodes. Paste the contents of your normal public key file, such as `~/.ssh/id_ed25519.pub`. At least one non-empty configured key is required. During `create`, readable default OpenSSH public key files such as `~/.ssh/id_ed25519.pub` and `~/.ssh/id_rsa.pub` are appended automatically, and the command fails early if none are readable. The first configured key is also used for the OpenStack keypair resource. | `list[string]` | empty list, but validation requires at least one configured key | `["ssh-ed25519 AAAA... user@host1", "ssh-rsa BBBB... user@host2"]` |
 
 ### `[security_groups.master]`
 
@@ -373,7 +382,7 @@ hailstack reboot --config my-cluster.toml --dotenv .env --node my-cluster-worker
 
 Synopsis: Build a Hailstack image for a selected compatibility bundle.
 
-Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. The machine running `hailstack build-image` must be able to SSH to that instance, either because `cluster.network_name` is runner-routable or because a floating IP pool is configured. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool.
+Packer launches a temporary build instance on `cluster.network_name`. Hailstack accepts the configured OpenStack network name and resolves it to the UUID Packer requires before invoking Packer. When `cluster.lustre_network` is non-blank, Hailstack resolves that network too and attaches it as a second interface; blank or whitespace-only values keep the previous single-network build. The machine running `hailstack build-image` must be able to SSH to the instance through the management network or a floating IP pool. By default `build-image` uses `cluster.floating_ip_pool`; set `[packer].floating_ip_pool` only when image builds need a different pool. When a floating IP pool is in use, Hailstack creates a temporary `hailstack-packer-ssh-*` security group with TCP/22 ingress, attaches it only to a temporary management port, attaches the Lustre network by UUID when configured, and deletes the temporary port before deleting the security group.
 
 Options:
 
@@ -489,7 +498,7 @@ The current implementation exposes services through security-group toggles plus 
 - nginx listens on `80` and `443`, proxies `/jupyter/`, `/spark/`, `/sparkhist/`, `/yarn/`, `/mapreduce/`, `/hdfs/`, per-worker `/nmNN/` pages, and `/netdata/` when monitoring is enabled.
 - The basic-auth username is `hailstack`.
 - cloud-init generates a self-signed TLS certificate on the master at `/etc/nginx/ssl/hailstack.crt` with the matching key at `/etc/nginx/ssl/hailstack.key`.
-- All `ssh_keys.public_keys` entries are written to `authorized_keys` on the cluster nodes. Use your usual public key file, for example `~/.ssh/id_ed25519.pub`; the first key is also registered as the OpenStack keypair.
+- All `ssh_keys.public_keys` entries, plus readable default OpenSSH public keys from the runner, are written to `authorized_keys` on the cluster nodes. Use your usual public key file, for example `~/.ssh/id_ed25519.pub`; the first configured key is also registered as the OpenStack keypair.
 - Public ingress is controlled by the `security_groups.master.*` and `security_groups.worker.*` booleans. Worker nodes default to internal-only access apart from the Spark worker and HDFS data-node ports.
 
 ## Monitoring
@@ -512,6 +521,8 @@ Monitoring is controlled by `cluster.monitoring`.
 | `HAILSTACK_VOLUME_PASSWORD required when a data volume is attached`                        | A volume is enabled, but the LUKS passphrase is missing.                                                             | Add `HAILSTACK_VOLUME_PASSWORD` to your environment or disable the volume section.                                                          |
 | `OpenStack CLI not found`                                                                  | The host environment lacks the `openstack` client.                                                                   | Use the packaged container entrypoint or install the expected OpenStack CLI in the environment that runs Hailstack.                         |
 | `Network '<name>' not found`, missing image, or missing floating IP errors during `create` | Pre-flight resource checks failed.                                                                                   | Verify `cluster.network_name`, `cluster.lustre_network`, the built image name `hailstack-<bundle-id>`, and any fixed `cluster.floating_ip`. |
+| Pulumi backend errors containing `XAmzContentSHA256Mismatch`                               | The Pulumi CLI version is incompatible with the documented Ceph S3 backend.                                           | Install or select Pulumi CLI `3.226.0`; the Apptainer image already pins this supported version.                                            |
+| Pulumi asks for `PULUMI_CONFIG_PASSPHRASE` during first-time `create`                      | Hailstack is not supplying its normal automatic Pulumi passphrase, or a custom Pulumi secrets setup is incomplete.    | Upgrade Hailstack and confirm the `ceph_s3` state-bucket credentials load from your config or `.env`; most users should not set Pulumi passphrase variables manually. |
 | `Timed out waiting for SSH connectivity to return` during `reboot`                         | The worker did not come back cleanly after reboot or SSH access is blocked.                                          | Check the instance console, confirm the security-group SSH setting, and verify the configured `cluster.ssh_username`.                       |
 | `Cluster not found` from `status`                                                          | The Pulumi stack for that cluster name does not exist in the configured Ceph backend.                                | Re-check `cluster.name`, Ceph S3 credentials, and whether the cluster was already destroyed.                                                |
 

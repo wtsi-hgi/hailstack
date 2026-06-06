@@ -37,8 +37,10 @@ from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import PulumiError, S3Error
 from hailstack.pulumi.resources import create_cluster_resources
 from hailstack.runtime_paths import RUNTIME_WORK_DIR, runtime_work_dir
+from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
 
 REPOSITORY_ROOT = RUNTIME_WORK_DIR
+S3_CHECKSUM_MISMATCH_ERROR = "XAmzContentSHA256Mismatch"
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class AutomationStackRunner:
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            detail = _add_supported_pulumi_hint(detail)
             endpoint = config.ceph_s3.endpoint.removeprefix("https://").removeprefix(
                 "http://"
             )
@@ -96,6 +99,7 @@ class AutomationStackRunner:
         config: ClusterConfig,
         bundle: Bundle,
         *,
+        image_id: str | None = None,
         stack_exists: bool | None = None,
     ) -> str:
         """Run a Pulumi preview and return the rendered plan output."""
@@ -107,6 +111,7 @@ class AutomationStackRunner:
                 config,
                 bundle,
                 create_if_missing=False,
+                image_id=image_id,
             )
             output_lines: list[str] = []
             try:
@@ -116,7 +121,7 @@ class AutomationStackRunner:
 
             return result.stdout or "".join(output_lines)
 
-        return self._preview_new_stack(config, bundle)
+        return self._preview_new_stack(config, bundle, image_id=image_id)
 
     def stack_exists(self, config: ClusterConfig) -> bool:
         """Return whether the configured Pulumi stack already exists."""
@@ -128,13 +133,20 @@ class AutomationStackRunner:
             raise
         return True
 
-    def _preview_new_stack(self, config: ClusterConfig, bundle: Bundle) -> str:
+    def _preview_new_stack(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> str:
         """Preview a first-time create against an ephemeral local backend."""
 
         def pulumi_program() -> None:
             create_cluster_resources(
                 config,
                 bundle,
+                image_id=image_id,
                 allow_missing_runtime_secrets=True,
             )
 
@@ -187,9 +199,20 @@ class AutomationStackRunner:
         stack = self._get_stack(config, None, create_if_missing=False)
         return {name: output.value for name, output in stack.outputs().items()}
 
-    def up(self, config: ClusterConfig, bundle: Bundle) -> CreateResult:
+    def up(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> CreateResult:
         """Apply the Pulumi stack and return the master floating IP output."""
-        stack = self._get_stack(config, bundle, create_if_missing=True)
+        stack = self._get_stack(
+            config,
+            bundle,
+            create_if_missing=True,
+            image_id=image_id,
+        )
         output_lines: list[str] = []
         try:
             result = stack.up(on_output=output_lines.append)
@@ -214,9 +237,20 @@ class AutomationStackRunner:
             retain_created_volume=retain_created_volume,
         )
 
-    def cleanup_failed_create(self, config: ClusterConfig, bundle: Bundle) -> None:
+    def cleanup_failed_create(
+        self,
+        config: ClusterConfig,
+        bundle: Bundle,
+        *,
+        image_id: str | None = None,
+    ) -> None:
         """Destroy a failed first-time create without retaining created volumes."""
-        self._destroy_stack(config, bundle, retain_created_volume=False)
+        self._destroy_stack(
+            config,
+            bundle,
+            retain_created_volume=False,
+            image_id=image_id,
+        )
 
     def _destroy_stack(
         self,
@@ -224,6 +258,7 @@ class AutomationStackRunner:
         bundle: Bundle | None,
         *,
         retain_created_volume: bool | None = None,
+        image_id: str | None = None,
     ) -> None:
         """Destroy the Pulumi stack with optional cleanup-specific ownership."""
         stack = self._get_stack(
@@ -232,6 +267,7 @@ class AutomationStackRunner:
             create_if_missing=False,
             retain_created_volume=retain_created_volume,
             allow_missing_runtime_secrets=True,
+            image_id=image_id,
         )
         try:
             stack.destroy(remove=True)
@@ -264,6 +300,7 @@ class AutomationStackRunner:
         create_if_missing: bool,
         retain_created_volume: bool | None = None,
         allow_missing_runtime_secrets: bool = False,
+        image_id: str | None = None,
     ) -> auto.Stack:
         """Select the cluster stack and optionally create it when missing."""
 
@@ -272,6 +309,7 @@ class AutomationStackRunner:
                 create_cluster_resources(
                     config,
                     bundle,
+                    image_id=image_id,
                     retain_created_volume=retain_created_volume,
                     allow_missing_runtime_secrets=allow_missing_runtime_secrets,
                     allow_missing_ssh_public_keys=allow_missing_runtime_secrets,
@@ -313,14 +351,21 @@ class AutomationStackRunner:
     @staticmethod
     def _backend_url(config: ClusterConfig) -> str:
         """Render the documented Pulumi Ceph backend URL."""
-        return f"s3://{config.ceph_s3.bucket}?endpoint={config.ceph_s3.endpoint}"
+        endpoint = _normalize_ceph_endpoint(config.ceph_s3.endpoint)
+        return f"s3://{config.ceph_s3.bucket}?endpoint={endpoint}"
 
     def _pulumi_env(self, config: ClusterConfig) -> dict[str, str]:
         """Build the process environment required for Pulumi backend access."""
         env = dict(os.environ)
         env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
         env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
+        _set_default_s3_region(env)
         env.setdefault("PULUMI_HOME", str(self._pulumi_home()))
+        if (
+            "PULUMI_CONFIG_PASSPHRASE" not in env
+            and "PULUMI_CONFIG_PASSPHRASE_FILE" not in env
+        ):
+            env["PULUMI_CONFIG_PASSPHRASE"] = config.ceph_s3.secret_key
         return env
 
     def _pulumi_home(self) -> Path:
@@ -345,6 +390,34 @@ def _is_missing_stack_error(error: Exception) -> bool:
     return "not found" in message or "no stack named" in message
 
 
+def _normalize_ceph_endpoint(endpoint: str) -> str:
+    """Return a Pulumi-compatible Ceph endpoint URL."""
+    normalized_endpoint = endpoint.rstrip("/")
+    if "://" not in normalized_endpoint:
+        return f"https://{normalized_endpoint}"
+    return normalized_endpoint
+
+
+def _set_default_s3_region(env: dict[str, str]) -> None:
+    """Populate S3 region variables required by Pulumi's S3 backend."""
+    region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
+    if not env.get("AWS_REGION"):
+        env["AWS_REGION"] = region
+    if not env.get("AWS_DEFAULT_REGION"):
+        env["AWS_DEFAULT_REGION"] = region
+
+
+def _add_supported_pulumi_hint(detail: str) -> str:
+    """Add a supported-version hint for known Ceph checksum failures."""
+    if S3_CHECKSUM_MISMATCH_ERROR not in detail:
+        return detail
+    hint = (
+        f"Use Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}; newer Pulumi CLI versions "
+        "may fail this Ceph backend with checksum mismatch."
+    )
+    return f"{detail} Hint: {hint}"
+
+
 def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
     """Return whether destroy must rebuild the Pulumi program."""
     floating_ip = getattr(config.cluster, "floating_ip", "")
@@ -353,4 +426,9 @@ def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
     )
 
 
-__all__ = ["AutomationStackRunner", "CreateResult", "REPOSITORY_ROOT"]
+__all__ = [
+    "AutomationStackRunner",
+    "CreateResult",
+    "REPOSITORY_ROOT",
+    "SUPPORTED_PULUMI_CLI_VERSION",
+]

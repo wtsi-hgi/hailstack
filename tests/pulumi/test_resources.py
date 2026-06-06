@@ -180,6 +180,8 @@ def _config(**overrides: object) -> ClusterConfig:
 def _run_stack(
     config: ClusterConfig,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    image_id: str | None = None,
 ) -> tuple[RecordingMocks, dict[str, object], dict[str, object]]:
     """Run the Pulumi program under mocks and resolve returned outputs."""
     monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
@@ -202,7 +204,11 @@ def _run_stack(
             _export,
         )
 
-        outputs = create_cluster_resources(config, _bundle())
+        outputs = (
+            create_cluster_resources(config, _bundle())
+            if image_id is None
+            else create_cluster_resources(config, _bundle(), image_id=image_id)
+        )
 
         resolved_outputs = {
             name: _resolve_output(loop, output) for name, output in outputs.items()
@@ -305,7 +311,7 @@ def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
 def test_num_workers_creates_master_keypair_ports_and_instances(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Create one tagged keypair, four main ports, and four instances."""
+    """Create one narrow keypair payload, four main ports, and four instances."""
     mocks, _, _ = _run_stack(_config(), monkeypatch)
 
     keypairs = _resource_inputs(mocks, "openstack:compute/keypair:Keypair")
@@ -314,10 +320,10 @@ def test_num_workers_creates_master_keypair_ports_and_instances(
 
     assert len(keypairs) == 1
     assert keypairs[0]["name"] == "test-cluster-keypair"
-    assert keypairs[0]["value_specs"] == {
-        "cluster_name": "test-cluster",
-        "tags": "test-cluster",
-    }
+    assert keypairs[0]["public_key"] == "ssh-ed25519 AAAA primary@test"
+    assert "value_specs" not in keypairs[0]
+    assert "cluster_name" not in keypairs[0]
+    assert "tags" not in keypairs[0]
     assert len(ports) == 4
     assert len(instances) == 4
     assert {instance["name"] for instance in instances} == {
@@ -338,6 +344,20 @@ def test_cluster_instances_enable_config_drive(
 
     assert len(instances) == 4
     assert all(instance["config_drive"] is True for instance in instances)
+
+
+def test_instances_use_resolved_image_id_when_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use a resolved Glance image ID so duplicate image names cannot matter."""
+    image_id = "19d4a6df-7435-4734-991a-c1629506659e"
+
+    mocks, _, _ = _run_stack(_config(), monkeypatch, image_id=image_id)
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+
+    assert len(instances) == 4
+    assert all(instance["image_id"] == image_id for instance in instances)
+    assert all("image_name" not in instance for instance in instances)
 
 
 def test_master_ssh_toggle_creates_tcp_22_rule(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,6 +749,40 @@ def test_lustre_ports_use_numbered_name_pattern_for_master_and_workers(
     ]
 
 
+def test_lustre_ports_omit_security_groups_and_port_security_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create Lustre ports without security groups or port-security overrides."""
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "ssh_username": "ubuntu",
+            "floating_ip": "",
+        }
+    )
+
+    mocks, _, _ = _run_stack(config, monkeypatch)
+    ports = _resource_inputs(mocks, "openstack:networking/port:Port")
+    management_ports = [
+        port for port in ports if "lustre-port" not in str(port["name"])
+    ]
+    lustre_ports = [port for port in ports if "lustre-port" in str(port["name"])]
+
+    assert len(management_ports) == 4
+    assert all("security_group_ids" in port for port in management_ports)
+    assert all("no_security_groups" not in port for port in management_ports)
+    assert len(lustre_ports) == 4
+    assert all("security_group_ids" not in port for port in lustre_ports)
+    assert all(port.get("no_security_groups") is True for port in lustre_ports)
+    assert all("port_security_enabled" not in port for port in lustre_ports)
+
+
 def test_empty_floating_ip_allocates_new_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -978,8 +1032,12 @@ def test_all_ssh_keys_are_present_in_master_and_worker_cloud_init(
 
     for instance in instances:
         user_data = str(instance["user_data"])
+        assert "Content-Type: multipart/mixed" in user_data
+        assert "Content-Type: text/cloud-config" in user_data
+        assert "ssh_authorized_keys:" in user_data
+        assert "Content-Type: text/x-shellscript" in user_data
         assert "#!/usr/bin/env bash" in user_data
-        assert "/etc/hadoop/conf/core-site.xml" in user_data
+        assert "/opt/hadoop/etc/hadoop/core-site.xml" in user_data
         assert all(key in user_data for key in keys)
 
 
@@ -1006,6 +1064,22 @@ def test_monitoring_netdata_create_flow_shares_one_api_key_across_all_nodes(
     assert "destination = 10.0.0.10:19999" in worker_user_data
     assert "10.0.0.11 worker-01 test-cluster-worker-01" in worker_user_data
     assert worker_api_keys == {_extract_netdata_api_key(master_user_data)}
+
+
+def test_master_create_flow_writes_master_private_ip_host_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render the master alias to the master private IP in create user-data."""
+    mocks, _, _ = _run_stack(_config(), monkeypatch)
+    instances = _resource_inputs(mocks, "openstack:compute/instance:Instance")
+    user_data_by_name = {
+        str(instance["name"]): str(instance["user_data"]) for instance in instances
+    }
+
+    master_user_data = user_data_by_name["test-cluster-master"]
+
+    assert "10.0.0.10 master test-cluster-master" in master_user_data
+    assert "127.0.1.1 master test-cluster-master" not in master_user_data
 
 
 def test_master_cloud_init_targets_attached_volume_id_in_create_flow(

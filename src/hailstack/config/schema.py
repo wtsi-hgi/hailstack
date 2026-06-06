@@ -29,6 +29,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from hailstack.config.ssh_keys import effective_create_public_keys
 from hailstack.errors import ConfigError
 
 CLUSTER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
@@ -187,6 +188,7 @@ class PackerConfig(BaseModel):
     base_image: str
     flavour: str = "m2.medium"
     floating_ip_pool: str = ""
+    gnomad_methods_version: str = "0.8.2"
 
     @field_validator("base_image")
     @classmethod
@@ -194,6 +196,14 @@ class PackerConfig(BaseModel):
         """Reject blank base-image values when packer settings are present."""
         if not value.strip():
             raise ValueError("packer.base_image required")
+        return value
+
+    @field_validator("gnomad_methods_version")
+    @classmethod
+    def validate_gnomad_methods_version(cls, value: str) -> str:
+        """Reject blank gnomAD methods package versions."""
+        if not value.strip():
+            raise ValueError("packer.gnomad_methods_version cannot be empty")
         return value
 
 
@@ -309,8 +319,14 @@ class ClusterConfig(BaseModel):
         ):
             raise ConfigError("Ceph S3 credentials required for Pulumi state backend")
 
-        if command == "create" and not self.ssh_keys.public_keys:
-            raise ConfigError("ssh_keys.public_keys required")
+        if command == "create":
+            self.ssh_keys = self.ssh_keys.model_copy(
+                update={
+                    "public_keys": effective_create_public_keys(
+                        self.ssh_keys.public_keys
+                    )
+                }
+            )
 
         return self
 

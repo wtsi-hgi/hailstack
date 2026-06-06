@@ -30,11 +30,25 @@ import pytest
 from hailstack.config.parser import load_config
 from hailstack.errors import ConfigError, ValidationError
 
+RUNNER_DEFAULT_PUBLIC_KEY = "ssh-rsa DEFAULT runner@test"
+
 
 def _write_config(path: Path, content: str) -> Path:
     """Write TOML content to a temporary config path."""
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _install_default_public_key(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+    public_key: str = RUNNER_DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Point Path.home at a temp home containing a default public key."""
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (ssh_dir / "id_rsa.pub").write_text(public_key + "\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
 
 
 def test_minimal_toml_populates_schema_defaults(tmp_path: Path) -> None:
@@ -204,6 +218,72 @@ public_keys = []
 
     with pytest.raises(ValidationError, match="At least one SSH public key required"):
         load_config(config_path)
+
+
+def test_create_validation_appends_runner_default_public_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Add the runner's default public key to create-time effective keys."""
+    _install_default_public_key(monkeypatch, tmp_path / "home")
+    configured_key = "ssh-ed25519 CONFIG configured@test"
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        f"""
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+
+[ceph_s3]
+endpoint = "https://ceph.example.invalid"
+bucket = "hailstack-state"
+access_key = "state-access"
+secret_key = "state-secret"
+
+[ssh_keys]
+public_keys = ["{configured_key}"]
+""".strip(),
+    )
+
+    config = load_config(config_path).validate_for_command("create")
+
+    assert config.ssh_keys.public_keys == [configured_key, RUNNER_DEFAULT_PUBLIC_KEY]
+
+
+def test_create_validation_fails_without_runner_default_public_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail early when manual default-key SSH would not reach cluster nodes."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    config_path = _write_config(
+        tmp_path / "cluster.toml",
+        """
+[cluster]
+name = "test-cluster"
+master_flavour = "m2.2xlarge"
+
+[ceph_s3]
+endpoint = "https://ceph.example.invalid"
+bucket = "hailstack-state"
+access_key = "state-access"
+secret_key = "state-secret"
+
+[ssh_keys]
+public_keys = ["ssh-ed25519 CONFIG configured@test"]
+""".strip(),
+    )
+
+    config = load_config(config_path)
+
+    with pytest.raises(ConfigError) as exc_info:
+        config.validate_for_command("create")
+    message = str(exc_info.value)
+    assert "readable default OpenSSH public key file" in message
+    assert "Create or regenerate the matching .pub file" in message
+    assert "does not read private keys" in message
 
 
 def test_volume_create_and_existing_volume_id_are_mutually_exclusive(

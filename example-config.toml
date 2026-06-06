@@ -9,6 +9,7 @@ master_flavour = "m2.2xlarge"
 # worker_flavour defaults to master_flavour if omitted
 # worker_flavour = "m2.2xlarge"
 network_name = "cloudforms_network"
+# build-image also attaches this network when set
 # lustre_network = "lustre_network"
 # lustre_mount_target = "10.1.0.1@tcp:/fsx"
 ssh_username = "ubuntu"
@@ -20,6 +21,7 @@ monitoring = "netdata"
 base_image = "ubuntu-22.04"
 flavour = "m2.medium"
 # floating_ip_pool = "build-public"  # optional build-image-specific override
+# gnomad_methods_version = "0.8.2"  # Python gnomAD methods package version
 
 [volumes]
 create = true

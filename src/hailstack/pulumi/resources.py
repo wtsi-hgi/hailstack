@@ -67,6 +67,7 @@ def create_cluster_resources(
     config: ClusterConfig,
     bundle: Bundle,
     *,
+    image_id: str | None = None,
     retain_created_volume: bool | None = None,
     allow_missing_runtime_secrets: bool = False,
     allow_missing_ssh_public_keys: bool = False,
@@ -90,7 +91,6 @@ def create_cluster_resources(
         keypair_name,
         name=keypair_name,
         public_key=public_keys[0],
-        value_specs=_cluster_value_specs(cluster_name),
     )
 
     master_security_group = SecGroup(
@@ -161,7 +161,7 @@ def create_cluster_resources(
         master_lustre_port = _create_port(
             _lustre_port_name(cluster_name, 0),
             lustre_network_id,
-            [master_security_group.id],
+            None,
             tags,
         )
         master_networks.append(InstanceNetworkArgs(port=master_lustre_port.id))
@@ -169,7 +169,7 @@ def create_cluster_resources(
             worker_lustre_port = _create_port(
                 _lustre_port_name(cluster_name, index),
                 lustre_network_id,
-                [worker_security_group.id],
+                None,
                 tags,
             )
             worker_network.append(InstanceNetworkArgs(port=worker_lustre_port.id))
@@ -195,18 +195,24 @@ def create_cluster_resources(
         tags,
         retain_created_volume=retain_created_volume,
     )
+    instance_image_id = _normalized_image_id(image_id)
+    instance_image_name = (
+        None if instance_image_id is not None else f"hailstack-{bundle.id}"
+    )
 
     master_instance = Instance(
         master_name,
         name=master_name,
         flavor_name=config.cluster.master_flavour,
-        image_name=f"hailstack-{bundle.id}",
+        image_id=instance_image_id,
+        image_name=instance_image_name,
         key_pair=keypair.name,
         config_drive=True,
         networks=master_networks,
         tags=tags,
         metadata=_instance_metadata(cluster_name, bundle.id, "master"),
         user_data=pulumi.Output.all(
+            master_private_ip,
             worker_private_ips,
             pulumi.Output.from_input(attached_volume_id),
         ).apply(
@@ -214,8 +220,9 @@ def create_cluster_resources(
                 config,
                 bundle,
                 resolved_inputs[0],
+                resolved_inputs[1],
                 shared_netdata_api_key,
-                attached_volume_id=_resolved_attached_volume_id(resolved_inputs[1]),
+                attached_volume_id=_resolved_attached_volume_id(resolved_inputs[2]),
                 allow_missing_runtime_secrets=allow_missing_runtime_secrets,
             )
         ),
@@ -232,7 +239,8 @@ def create_cluster_resources(
             worker_name,
             name=worker_name,
             flavor_name=config.cluster.worker_flavour,
-            image_name=f"hailstack-{bundle.id}",
+            image_id=instance_image_id,
+            image_name=instance_image_name,
             key_pair=keypair.name,
             config_drive=True,
             networks=worker_network,
@@ -363,10 +371,19 @@ def _create_internal_rule(
 def _create_port(
     name: str,
     network_id: pulumi.Input[str],
-    security_group_ids: Sequence[pulumi.Input[str]],
+    security_group_ids: Sequence[pulumi.Input[str]] | None,
     tags: Sequence[str],
 ) -> Port:
-    """Create an OpenStack Neutron port with the given security groups."""
+    """Create an OpenStack Neutron port with optional security-group attachment."""
+    if security_group_ids is None:
+        return Port(
+            name,
+            name=name,
+            network_id=network_id,
+            no_security_groups=True,
+            tags=list(tags),
+        )
+
     return Port(
         name,
         name=name,
@@ -471,9 +488,18 @@ def _netdata_api_key(config: ClusterConfig) -> str | None:
     return str(uuid4())
 
 
+def _normalized_image_id(image_id: str | None) -> str | None:
+    """Return a non-blank image ID when create preflight resolved one."""
+    if image_id is None:
+        return None
+    normalized = image_id.strip()
+    return normalized or None
+
+
 def _render_master_cloud_init(
     config: ClusterConfig,
     bundle: Bundle,
+    master_private_ip: object,
     worker_ips: Sequence[object],
     netdata_api_key: str | None,
     *,
@@ -481,11 +507,14 @@ def _render_master_cloud_init(
     allow_missing_runtime_secrets: bool = False,
 ) -> str:
     """Render master user-data from resolved cluster IP addresses."""
+    if not isinstance(master_private_ip, str):
+        raise PulumiError("Expected resolved master fixed IP value to be a string")
     return generate_master_cloud_init(
         config,
         bundle,
         _resolved_ip_list(worker_ips),
         netdata_api_key=netdata_api_key,
+        master_private_ip=master_private_ip,
         attached_volume_id=attached_volume_id,
         allow_missing_runtime_secrets=allow_missing_runtime_secrets,
     )

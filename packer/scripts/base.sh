@@ -2,12 +2,21 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+HAILSTACK_PACKER_APT_HELPER="${HAILSTACK_PACKER_APT_HELPER:-/tmp/hailstack-packer-apt-locks.sh}"
+if [[ ! -r "${HAILSTACK_PACKER_APT_HELPER}" ]]; then
+	script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	if [[ -r "${script_dir}/apt-locks.sh" ]]; then
+		HAILSTACK_PACKER_APT_HELPER="${script_dir}/apt-locks.sh"
+	fi
+fi
+# shellcheck source=/tmp/hailstack-packer-apt-locks.sh
+source "${HAILSTACK_PACKER_APT_HELPER}"
 
 PYTHON_BIN="python${PYTHON_VERSION}"
 PYTHON_VENV_PACKAGE="${PYTHON_BIN}-venv"
 
-apt-get update
-apt-get install -y \
+hailstack_apt_get update
+hailstack_apt_get install -y \
 	apache2-utils \
 	curl \
 	ca-certificates \
@@ -20,11 +29,11 @@ apt-get install -y \
 	software-properties-common
 
 if ! apt-cache show "${PYTHON_BIN}" >/dev/null 2>&1; then
-	add-apt-repository -y ppa:deadsnakes/ppa
-	apt-get update
+	hailstack_add_apt_repository -y ppa:deadsnakes/ppa
+	hailstack_apt_get update
 fi
 
-apt-get install -y "${PYTHON_BIN}" "${PYTHON_VENV_PACKAGE}"
+hailstack_apt_get install -y "${PYTHON_BIN}" "${PYTHON_VENV_PACKAGE}"
 
 install -d -m 0755 /opt/hailstack/base-venv
 "${PYTHON_BIN}" -m venv /opt/hailstack/base-venv

@@ -24,9 +24,12 @@
 """Acceptance tests for D3 master cloud-init generation."""
 
 import re
+from email import message_from_string, policy
+from pathlib import Path
 from shlex import quote
 
 import pytest
+import yaml
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import ConfigError
@@ -34,6 +37,8 @@ from hailstack.pulumi.cloud_init import (
     generate_master_cloud_init,
     generate_worker_cloud_init,
 )
+
+RUNNER_DEFAULT_PUBLIC_KEY = "ssh-rsa DEFAULT runner@test"
 
 
 def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
@@ -45,6 +50,46 @@ def _extract_netdata_api_key(rendered_cloud_init: str) -> str:
     )
     assert api_key_match is not None
     return api_key_match.group(1)
+
+
+def _cloud_init_part(rendered_cloud_init: str, content_type: str) -> str:
+    """Return the decoded content for a MIME cloud-init part."""
+    message = message_from_string(rendered_cloud_init, policy=policy.default)
+    assert message.is_multipart()
+    for part in message.iter_parts():
+        if part.get_content_type() == content_type:
+            content = part.get_content()
+            assert isinstance(content, str)
+            return content
+    raise AssertionError(f"missing cloud-init part {content_type}")
+
+
+def _cloud_config_users(rendered_cloud_init: str) -> list[object]:
+    """Return the parsed cloud-config users list from rendered user-data."""
+    cloud_config = _cloud_init_part(rendered_cloud_init, "text/cloud-config")
+    assert cloud_config.startswith("#cloud-config\n")
+    parsed = yaml.safe_load(cloud_config.removeprefix("#cloud-config\n"))
+    assert isinstance(parsed, dict)
+    users = parsed["users"]
+    assert isinstance(users, list)
+    return users
+
+
+def _cloud_config_document(rendered_cloud_init: str) -> dict[str, object]:
+    """Return the parsed cloud-config document from rendered user-data."""
+    cloud_config = _cloud_init_part(rendered_cloud_init, "text/cloud-config")
+    assert cloud_config.startswith("#cloud-config\n")
+    parsed = yaml.safe_load(cloud_config.removeprefix("#cloud-config\n"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def _ssh_user_entry(rendered_cloud_init: str, username: str) -> dict[str, object]:
+    """Return the configured cloud-config user entry by username."""
+    for user in _cloud_config_users(rendered_cloud_init):
+        if isinstance(user, dict) and user.get("name") == username:
+            return user
+    raise AssertionError(f"missing cloud-config user {username}")
 
 
 def _bundle() -> Bundle:
@@ -100,6 +145,60 @@ def _non_contiguous_worker_ips() -> list[str]:
 def _master_ip() -> str:
     """Return a stable master private IP for worker config rendering."""
     return "10.0.0.10"
+
+
+def _lustre_fstab_command(mount_target: str) -> str:
+    """Return the expected literal fstab append guard for a Lustre target."""
+    fstab_line = f"{mount_target} /lustre lustre defaults,_netdev 0 0"
+    quoted_line = quote(fstab_line)
+    return (
+        f"grep -Fxq -- {quoted_line} /etc/fstab || "
+        f"printf '%s\\n' {quoted_line} >> /etc/fstab"
+    )
+
+
+def test_cloud_config_overrides_baked_package_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disable baked image package updates during first boot."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+
+        assert cloud_config["package_update"] is False
+        assert cloud_config["package_upgrade"] is False
+        assert cloud_config["package_reboot_if_required"] is False
+        assert "systemctl mask --force mountLustre.service || true" in joined_bootcmd
+        assert "metricbeat-openstack-setup.service" in joined_bootcmd
+        assert (
+            "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26 "
+            "/lustre lustre defaults,_netdev 0 0"
+        ) in joined_bootcmd
+        assert (
+            _ssh_user_entry(rendered_cloud_init, "ubuntu")["ssh_authorized_keys"]
+            == config.ssh_keys.public_keys
+        )
 
 
 def test_monitoring_netdata_enables_netdata_service(
@@ -286,6 +385,23 @@ def test_hosts_block_contains_master_and_all_workers(
     assert "10.0.0.11 worker-01 test-cluster-worker-01" in result
     assert "10.0.0.12 worker-02 test-cluster-worker-02" in result
     assert "10.0.0.13 worker-03 test-cluster-worker-03" in result
+
+
+def test_master_hosts_block_uses_supplied_master_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map the master alias to its private IP when the renderer receives it."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+        master_private_ip=_master_ip(),
+    )
+
+    assert "10.0.0.10 master test-cluster-master" in result
+    assert "127.0.1.1 master test-cluster-master" not in result
 
 
 def test_nginx_config_contains_all_required_proxy_locations(
@@ -489,6 +605,57 @@ def test_master_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
     assert "hdfs namenode -format -nonInteractive" in result
 
 
+def test_master_hadoop_config_is_visible_to_hdfs_format_and_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Write generated Hadoop XML where the installed Hadoop scripts read it."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    hadoop_conf_dir = "/opt/hadoop/etc/hadoop"
+    hdfs_site_write = f"{hadoop_conf_dir}/hdfs-site.xml"
+    format_command = "/opt/hadoop/bin/hdfs namenode -format -nonInteractive"
+    namenode_start = "systemctl restart hdfs-namenode"
+
+    assert f"{hadoop_conf_dir}/core-site.xml" in shell_script
+    assert hdfs_site_write in shell_script
+    assert "dfs.namenode.name.dir" in shell_script
+    assert "/etc/hadoop/conf/" not in shell_script
+    assert shell_script.index(hdfs_site_write) < shell_script.index(format_command)
+    assert shell_script.index(format_command) < shell_script.index(namenode_start)
+
+
+def test_master_cloud_init_prepares_spark_history_config_before_service_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare the Spark history log directory before activating the service."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+
+    result = generate_master_cloud_init(
+        _config(),
+        _bundle(),
+        _worker_ips(),
+    )
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    etc_spark_defaults = "/etc/spark/conf/spark-defaults.conf"
+    opt_spark_defaults = "/opt/spark/conf/spark-defaults.conf"
+    history_dir = "/home/ubuntu/data/spark-history"
+    history_install = (
+        "install -d -m 0755 /home/ubuntu/data /home/ubuntu/data/hdfs "
+        f"/home/ubuntu/data/hdfs/name {history_dir}"
+    )
+    spark_defaults_link = f"ln -sfn {etc_spark_defaults} {opt_spark_defaults}"
+    history_start = "systemctl restart spark-history-server"
+
+    assert spark_defaults_link in shell_script
+    assert f"spark.history.fs.logDirectory file://{history_dir}" in shell_script
+    assert shell_script.index(spark_defaults_link) < shell_script.index(history_start)
+    assert shell_script.index(history_install) < shell_script.index(history_start)
+
+
 def test_worker_cloud_init_creates_hdfs_data_dirs_without_shared_volume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -603,6 +770,77 @@ def test_all_ssh_public_keys_are_written_to_authorized_keys(
     assert "ssh-ed25519 CCCC user3@test" in result
 
 
+def test_master_cloud_init_installs_all_ssh_keys_during_config_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install every configured public key before the final shellscript runs."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config()
+
+    result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    ssh_user = _ssh_user_entry(result, "ubuntu")
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    assert "default" in _cloud_config_users(result)
+    assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
+    assert "#!/usr/bin/env bash" in shell_script
+    assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in shell_script
+
+
+def test_worker_cloud_init_installs_all_ssh_keys_during_config_stage() -> None:
+    """Install worker SSH keys in cloud-config while preserving setup shellscript."""
+    config = _config()
+
+    result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+    ssh_user = _ssh_user_entry(result, "ubuntu")
+    shell_script = _cloud_init_part(result, "text/x-shellscript")
+
+    assert "default" in _cloud_config_users(result)
+    assert ssh_user["ssh_authorized_keys"] == config.ssh_keys.public_keys
+    assert "#!/usr/bin/env bash" in shell_script
+    assert "/home/ubuntu/.ssh/authorized_keys" in shell_script
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in shell_script
+
+
+def test_effective_runner_default_key_reaches_master_and_worker_cloud_init(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render the enriched create-time SSH key list into every node."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (ssh_dir / "id_rsa.pub").write_text(
+        RUNNER_DEFAULT_PUBLIC_KEY + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: home)
+    configured_key = "ssh-ed25519 CONFIG configured@test"
+    config = _config(ssh_keys={"public_keys": [configured_key]}).validate_for_command(
+        "create",
+        require_backend=False,
+    )
+    expected_keys = [configured_key, RUNNER_DEFAULT_PUBLIC_KEY]
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    assert _ssh_user_entry(master_result, "ubuntu")["ssh_authorized_keys"] == (
+        expected_keys
+    )
+    assert _ssh_user_entry(worker_result, "ubuntu")["ssh_authorized_keys"] == (
+        expected_keys
+    )
+    assert RUNNER_DEFAULT_PUBLIC_KEY in _cloud_init_part(
+        master_result, "text/x-shellscript"
+    )
+    assert RUNNER_DEFAULT_PUBLIC_KEY in _cloud_init_part(
+        worker_result, "text/x-shellscript"
+    )
+
+
 def test_s3_settings_inject_s3a_properties_into_core_site(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -670,12 +908,8 @@ def test_lustre_network_configures_lustre_mount_point(
     )
 
     assert "install -d -m 0755 /lustre" in result
-    assert (
-        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
-        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
-    )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+    assert _lustre_fstab_command("10.1.0.1@tcp:/fsx") in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
 def test_lustre_network_uses_configured_mount_target(
@@ -703,12 +937,180 @@ def test_lustre_network_uses_configured_mount_target(
         _worker_ips(),
     )
 
-    assert (
-        "grep -q '^192.0.2.10@tcp:/custom /lustre lustre ' /etc/fstab || echo "
-        "'192.0.2.10@tcp:/custom /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
+    assert _lustre_fstab_command("192.0.2.10@tcp:/custom") in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
+
+
+def test_lustre_fstab_check_uses_exact_fixed_line_for_regex_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check the full fstab line literally when Lustre targets contain dots."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    mount_target = "192.0.2.10@tcp:fsx.example.internal:/custom"
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": mount_target,
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
     )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for result in (master_result, worker_result):
+        assert _lustre_fstab_command(mount_target) in result
+        assert f"grep -q '^{mount_target} /lustre lustre '" not in result
+
+
+def test_lustre_cloud_init_replaces_baked_mounts_before_final_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent baked site-wide Lustre mounts from blocking cloud-init final."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+        shell_script = _cloud_init_part(rendered_cloud_init, "text/x-shellscript")
+
+        assert "systemctl kill mountLustre.service || true" in joined_bootcmd
+        assert "systemctl mask --force mountLustre.service || true" in joined_bootcmd
+        assert "awk '$3 != \"lustre\" { print }' /etc/fstab" in joined_bootcmd
+        assert (
+            "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26 "
+            "/lustre lustre defaults,_netdev 0 0"
+        ) in joined_bootcmd
+        assert "systemctl mask --force mountLustre.service || true" in shell_script
+        assert shell_script.index("awk '$3 != \"lustre\" { print }' /etc/fstab") < (
+            shell_script.index("timeout --kill-after=15s 120s mount /lustre")
+        )
+
+
+def test_first_boot_cleanup_uses_compatible_systemd_and_masks_baked_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop baked site services before they can block cloud-init final."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+        shell_script = _cloud_init_part(rendered_cloud_init, "text/x-shellscript")
+
+        assert "--kill-whom" not in joined_bootcmd
+        assert "--kill-whom" not in shell_script
+        assert "systemctl kill mountLustre.service || true" in joined_bootcmd
+        assert "systemctl mask --force mountLustre.service || true" in joined_bootcmd
+        assert "systemctl mask --force mountLustre.service || true" in shell_script
+        assert (
+            "systemctl stop --no-block metricbeat-openstack-setup.service || true"
+            in joined_bootcmd
+        )
+        assert (
+            "systemctl disable metricbeat-openstack-setup.service || true"
+            in joined_bootcmd
+        )
+        assert (
+            "systemctl mask --force metricbeat-openstack-setup.service || true"
+            in joined_bootcmd
+        )
+        assert "metricbeat-openstack-setup.service" not in shell_script
+
+
+def test_lustre_mount_is_bounded_and_local_baked_units_are_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep configured Lustre from holding cloud-init final indefinitely."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": "10.160.42.101@tcp3:10.160.42.100@tcp3:/lus26",
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for rendered_cloud_init in (master_result, worker_result):
+        cloud_config = _cloud_config_document(rendered_cloud_init)
+        bootcmd = cloud_config["bootcmd"]
+        assert isinstance(bootcmd, list)
+        joined_bootcmd = "\n".join(str(command) for command in bootcmd)
+        shell_script = _cloud_init_part(rendered_cloud_init, "text/x-shellscript")
+
+        for service in (
+            "mountLustre.service",
+            "metricbeat-openstack-setup.service",
+        ):
+            remove_command = f"rm -f /etc/systemd/system/{service}"
+            mask_command = f"systemctl mask --force {service} || true"
+            assert remove_command in joined_bootcmd
+            assert joined_bootcmd.index(remove_command) < joined_bootcmd.index(
+                mask_command
+            )
+
+        assert "mountpoint -q /lustre || mount /lustre" not in shell_script
+        assert "timeout --kill-after=15s 120s mount /lustre" in shell_script
+        assert (
+            "Hailstack warning: configured Lustre target did not mount within "
+            "120 seconds or failed; continuing cloud-init final setup"
+        ) in shell_script
+        assert "rm -f /etc/systemd/system/mountLustre.service" in shell_script
 
 
 def test_nginx_config_is_written_only_to_sites_enabled_path(
@@ -731,8 +1133,8 @@ def test_hadoop_and_spark_config_use_dedicated_conf_directories(
 
     result = generate_master_cloud_init(_config(), _bundle(), _worker_ips())
 
-    assert "/etc/hadoop/conf/core-site.xml" in result
-    assert "/etc/hadoop/conf/hdfs-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
     assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/hadoop/hadoop-env.sh" not in result
@@ -863,12 +1265,8 @@ def test_worker_lustre_network_configures_lustre_mount_point() -> None:
     )
 
     assert "install -d -m 0755 /lustre" in result
-    assert (
-        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
-        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
-    )
-    assert "mountpoint -q /lustre || mount /lustre" in result
+    assert _lustre_fstab_command("10.1.0.1@tcp:/fsx") in result
+    assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
 def test_worker_extras_system_packages_are_installed_with_apt() -> None:
@@ -907,8 +1305,8 @@ def test_worker_config_uses_dedicated_conf_directories_only() -> None:
     """Write worker config to dedicated conf directories only."""
     result = generate_worker_cloud_init(_config(), _bundle(), _master_ip(), 1)
 
-    assert "/etc/hadoop/conf/core-site.xml" in result
-    assert "/etc/hadoop/conf/hdfs-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/core-site.xml" in result
+    assert "/opt/hadoop/etc/hadoop/hdfs-site.xml" in result
     assert "/etc/spark/conf/spark-defaults.conf" in result
     assert "spark.pyspark.python /opt/hailstack/overlay-venv/bin/python" in result
     assert "/etc/netdata/stream.conf" in result
