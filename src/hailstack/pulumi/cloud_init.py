@@ -599,12 +599,13 @@ def _configured_lustre_fstab_command(config: ClusterConfig) -> str | None:
     """Render the configured Lustre fstab append command, when enabled."""
     if not config.cluster.lustre_network.strip():
         return None
+    fstab_line = (
+        f"{config.cluster.lustre_mount_target} /lustre lustre defaults,_netdev 0 0"
+    )
+    quoted_line = quote(fstab_line)
     return (
-        "grep -q '^"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre ' /etc/fstab || echo '"
-        + config.cluster.lustre_mount_target
-        + " /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
+        f"grep -Fxq -- {quoted_line} /etc/fstab || "
+        f"printf '%s\\n' {quoted_line} >> /etc/fstab"
     )
 
 

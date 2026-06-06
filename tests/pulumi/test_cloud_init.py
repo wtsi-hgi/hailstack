@@ -147,6 +147,16 @@ def _master_ip() -> str:
     return "10.0.0.10"
 
 
+def _lustre_fstab_command(mount_target: str) -> str:
+    """Return the expected literal fstab append guard for a Lustre target."""
+    fstab_line = f"{mount_target} /lustre lustre defaults,_netdev 0 0"
+    quoted_line = quote(fstab_line)
+    return (
+        f"grep -Fxq -- {quoted_line} /etc/fstab || "
+        f"printf '%s\\n' {quoted_line} >> /etc/fstab"
+    )
+
+
 def test_cloud_config_overrides_baked_package_updates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -898,11 +908,7 @@ def test_lustre_network_configures_lustre_mount_point(
     )
 
     assert "install -d -m 0755 /lustre" in result
-    assert (
-        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
-        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
-    )
+    assert _lustre_fstab_command("10.1.0.1@tcp:/fsx") in result
     assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
@@ -931,12 +937,37 @@ def test_lustre_network_uses_configured_mount_target(
         _worker_ips(),
     )
 
-    assert (
-        "grep -q '^192.0.2.10@tcp:/custom /lustre lustre ' /etc/fstab || echo "
-        "'192.0.2.10@tcp:/custom /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
-    )
+    assert _lustre_fstab_command("192.0.2.10@tcp:/custom") in result
     assert "timeout --kill-after=15s 120s mount /lustre" in result
+
+
+def test_lustre_fstab_check_uses_exact_fixed_line_for_regex_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check the full fstab line literally when Lustre targets contain dots."""
+    monkeypatch.setenv("HAILSTACK_WEB_PASSWORD", "web-secret")
+    mount_target = "192.0.2.10@tcp:fsx.example.internal:/custom"
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": "lustre-net",
+            "lustre_mount_target": mount_target,
+            "ssh_username": "ubuntu",
+            "monitoring": "netdata",
+        }
+    )
+
+    master_result = generate_master_cloud_init(config, _bundle(), _worker_ips())
+    worker_result = generate_worker_cloud_init(config, _bundle(), _master_ip(), 1)
+
+    for result in (master_result, worker_result):
+        assert _lustre_fstab_command(mount_target) in result
+        assert f"grep -q '^{mount_target} /lustre lustre '" not in result
 
 
 def test_lustre_cloud_init_replaces_baked_mounts_before_final_setup(
@@ -1234,11 +1265,7 @@ def test_worker_lustre_network_configures_lustre_mount_point() -> None:
     )
 
     assert "install -d -m 0755 /lustre" in result
-    assert (
-        "grep -q '^10.1.0.1@tcp:/fsx /lustre lustre ' /etc/fstab || echo "
-        "'10.1.0.1@tcp:/fsx /lustre lustre defaults,_netdev 0 0' >> /etc/fstab"
-        in result
-    )
+    assert _lustre_fstab_command("10.1.0.1@tcp:/fsx") in result
     assert "timeout --kill-after=15s 120s mount /lustre" in result
 
 
