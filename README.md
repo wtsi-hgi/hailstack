@@ -186,10 +186,10 @@ The steps below assume you have completed Installation and the `hailstack` comma
 
 ## Using A Cluster
 
-Images built by Hailstack include `/etc/profile.d/hailstack.sh`, so SSH login shells are set up for the intended runtime automatically. After `create` prints the master floating IP, connect with the configured login user:
+Images built by Hailstack include `/etc/profile.d/hailstack.sh`, so SSH login shells are set up for the intended runtime automatically. After `create` prints the master floating IP, connect with the login user configured by `cluster.ssh_username`:
 
 ```bash
-ssh ubuntu@<master-ip>
+ssh <cluster.ssh_username>@<master-ip>
 ```
 
 The profile exports these paths and puts their command directories on `PATH`:

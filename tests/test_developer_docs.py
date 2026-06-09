@@ -167,7 +167,7 @@ def test_readme_documents_cluster_runtime_usage() -> None:
 
     for snippet in (
         "## Using A Cluster",
-        "ssh ubuntu@<master-ip>",
+        "ssh <cluster.ssh_username>@<master-ip>",
         "https://<master-ip>/jupyter/",
         "`HAILSTACK_RUNTIME_PYTHON`",
         "`HAILSTACK_BASE_VENV`",
