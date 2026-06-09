@@ -161,6 +161,31 @@ def test_readme_and_example_config_describe_default_public_key_file() -> None:
     assert "~/.ssh/id_ed25519.pub" in example_config_text
 
 
+def test_readme_documents_cluster_runtime_usage() -> None:
+    """Explain how to use the baked cluster runtimes after create."""
+    readme_text = _read(README_PATH)
+
+    for snippet in (
+        "## Using A Cluster",
+        "ssh <cluster.ssh_username>@<master-ip>",
+        "https://<master-ip>/jupyter/",
+        "`HAILSTACK_RUNTIME_PYTHON`",
+        "`HAILSTACK_BASE_VENV`",
+        "`HAILSTACK_OVERLAY_VENV`",
+        "`PYSPARK_PYTHON`",
+        "`SPARK_HOME`",
+        "`HADOOP_HOME`",
+        "python - <<'PY'",
+        "import hail as hl",
+        "import gnomad",
+        "spark-submit",
+        "pyspark",
+        "hadoop fs",
+        "extras.python_packages",
+    ):
+        assert snippet in readme_text
+
+
 def test_ai_covers_required_conventions_and_common_tasks() -> None:
     """Require the N2-specific AI guidance beyond headings and commands."""
     ai_text = _read(AI_PATH)

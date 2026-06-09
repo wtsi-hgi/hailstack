@@ -132,6 +132,9 @@ def _rewrite_base_script(path: Path, temp_root: Path) -> Path:
     rewritten = path.read_text(encoding="utf-8")
     replacements = {
         "/opt/hailstack": str(temp_root / "opt" / "hailstack"),
+        "/opt/spark": str(temp_root / "opt" / "spark"),
+        "/opt/hadoop": str(temp_root / "opt" / "hadoop"),
+        "/etc/profile.d": str(temp_root / "etc" / "profile.d"),
         "/etc/systemd/system": str(temp_root / "etc" / "systemd" / "system"),
         "/lib/systemd/system": str(temp_root / "lib" / "systemd" / "system"),
     }
@@ -190,21 +193,8 @@ def _rewrite_jupyter_script(path: Path, temp_root: Path) -> Path:
     return rewritten_path
 
 
-def test_o2_each_ubuntu_provisioner_script_ends_with_version_check_command() -> None:
-    """Require every Ubuntu provisioner script to end with a version-check command."""
-    offenders = [
-        f"{path.name}: {_last_command(path)}"
-        for path in _script_paths(UBUNTU_SCRIPTS_PATH)
-        if VERSION_CHECK_PATTERN.search(_last_command(path)) is None
-    ]
-
-    assert offenders == []
-
-
-def test_o2_base_script_exits_zero_with_mock_version_environment(
-    tmp_path: Path,
-) -> None:
-    """Run a hermetic temp copy of base.sh with mocked version vars and tools."""
+def _run_rewritten_base_script(tmp_path: Path) -> Path:
+    """Run a temp copy of base.sh with mocked tools and return the fake root."""
     temp_root = tmp_path / "root"
     bin_dir, _command_log = _stub_environment(tmp_path)
     (temp_root / "etc" / "systemd" / "system").mkdir(parents=True)
@@ -278,6 +268,132 @@ def test_o2_base_script_exits_zero_with_mock_version_environment(
     )
 
     assert result.returncode == 0, result.stderr
+    return temp_root
+
+
+def test_o2_each_ubuntu_provisioner_script_ends_with_version_check_command() -> None:
+    """Require every Ubuntu provisioner script to end with a version-check command."""
+    offenders = [
+        f"{path.name}: {_last_command(path)}"
+        for path in _script_paths(UBUNTU_SCRIPTS_PATH)
+        if VERSION_CHECK_PATTERN.search(_last_command(path)) is None
+    ]
+
+    assert offenders == []
+
+
+def test_o2_base_script_exits_zero_with_mock_version_environment(
+    tmp_path: Path,
+) -> None:
+    """Run a hermetic temp copy of base.sh with mocked version vars and tools."""
+    _run_rewritten_base_script(tmp_path)
+
+
+def test_o2_base_script_installs_login_runtime_profile(tmp_path: Path) -> None:
+    """Expose Hailstack runtime commands to SSH login shells."""
+    temp_root = _run_rewritten_base_script(tmp_path)
+    base_venv = temp_root / "opt" / "hailstack" / "base-venv"
+    overlay_venv = temp_root / "opt" / "hailstack" / "overlay-venv"
+    spark_home = temp_root / "opt" / "spark"
+    hadoop_home = temp_root / "opt" / "hadoop"
+    profile_path = temp_root / "etc" / "profile.d" / "hailstack.sh"
+    for command_dir in (
+        base_venv / "bin",
+        spark_home / "bin",
+        spark_home / "sbin",
+        hadoop_home / "bin",
+        hadoop_home / "sbin",
+    ):
+        command_dir.mkdir(parents=True, exist_ok=True)
+
+    for command_path in (
+        base_venv / "bin" / "jupyter",
+        base_venv / "bin" / "spark-submit",
+        base_venv / "bin" / "pyspark",
+        base_venv / "bin" / "hadoop",
+    ):
+        _write_stub_command(
+            command_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+        )
+    for command_path in (
+        spark_home / "bin" / "spark-submit",
+        spark_home / "bin" / "pyspark",
+        hadoop_home / "bin" / "hadoop",
+    ):
+        _write_stub_command(
+            command_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+        )
+
+    assert profile_path.is_file()
+
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HAILSTACK_PROFILE_PATH": str(profile_path),
+        "EXPECTED_BASE_VENV": str(base_venv),
+        "EXPECTED_OVERLAY_VENV": str(overlay_venv),
+        "EXPECTED_SPARK_HOME": str(spark_home),
+        "EXPECTED_HADOOP_HOME": str(hadoop_home),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                (
+                    "set -euo pipefail",
+                    'source "${HAILSTACK_PROFILE_PATH}"',
+                    '[[ "${HAILSTACK_BASE_VENV}" == "${EXPECTED_BASE_VENV}" ]]',
+                    ('[[ "${HAILSTACK_OVERLAY_VENV}" == "${EXPECTED_OVERLAY_VENV}" ]]'),
+                    (
+                        '[[ "${HAILSTACK_RUNTIME_PYTHON}" '
+                        '== "${EXPECTED_OVERLAY_VENV}/bin/python" ]]'
+                    ),
+                    '[[ "${SPARK_HOME}" == "${EXPECTED_SPARK_HOME}" ]]',
+                    '[[ "${HADOOP_HOME}" == "${EXPECTED_HADOOP_HOME}" ]]',
+                    (
+                        '[[ "${PYSPARK_PYTHON}" '
+                        '== "${EXPECTED_OVERLAY_VENV}/bin/python" ]]'
+                    ),
+                    (
+                        '[[ "${PATH}" == '
+                        '"${EXPECTED_OVERLAY_VENV}/bin:'
+                        "${EXPECTED_SPARK_HOME}/bin:${EXPECTED_SPARK_HOME}/sbin:"
+                        "${EXPECTED_HADOOP_HOME}/bin:${EXPECTED_HADOOP_HOME}/sbin:"
+                        '${EXPECTED_BASE_VENV}/bin:"* ]]'
+                    ),
+                    (
+                        '[[ "$(command -v python)" '
+                        '== "${EXPECTED_OVERLAY_VENV}/bin/python" ]]'
+                    ),
+                    (
+                        '[[ "$(command -v jupyter)" '
+                        '== "${EXPECTED_BASE_VENV}/bin/jupyter" ]]'
+                    ),
+                    (
+                        '[[ "$(command -v spark-submit)" '
+                        '== "${EXPECTED_SPARK_HOME}/bin/spark-submit" ]]'
+                    ),
+                    (
+                        '[[ "$(command -v pyspark)" '
+                        '== "${EXPECTED_SPARK_HOME}/bin/pyspark" ]]'
+                    ),
+                    (
+                        '[[ "$(command -v hadoop)" '
+                        '== "${EXPECTED_HADOOP_HOME}/bin/hadoop" ]]'
+                    ),
+                )
+            ),
+        ],
+        capture_output=True,
+        check=False,
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_o2_hadoop_script_discovers_java_home_from_installed_java(

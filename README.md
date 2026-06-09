@@ -184,6 +184,65 @@ The steps below assume you have completed Installation and the `hailstack` comma
 
    `destroy` asks you to type the cluster name to confirm.
 
+## Using A Cluster
+
+Images built by Hailstack include `/etc/profile.d/hailstack.sh`, so SSH login shells are set up for the intended runtime automatically. After `create` prints the master floating IP, connect with the login user configured by `cluster.ssh_username`:
+
+```bash
+ssh <cluster.ssh_username>@<master-ip>
+```
+
+The profile exports these paths and puts their command directories on `PATH`:
+
+| Variable | Meaning |
+| -------- | ------- |
+| `HAILSTACK_BASE_VENV` | Immutable baked Python environment containing Hail, gnomAD, JupyterLab, and bundle-pinned dependencies. |
+| `HAILSTACK_OVERLAY_VENV` | Runtime Python environment for cluster and user additions. It can see the baked base packages. |
+| `HAILSTACK_RUNTIME_PYTHON` | The Python executable users, Jupyter, and Spark should run: `/opt/hailstack/overlay-venv/bin/python`. |
+| `PYSPARK_PYTHON` | PySpark Python executable, matching `HAILSTACK_RUNTIME_PYTHON`. |
+| `SPARK_HOME` | Spark install location, normally `/opt/spark`. |
+| `HADOOP_HOME` | Hadoop install location, normally `/opt/hadoop`. |
+
+The overlay venv is first on `PATH`, then Spark and Hadoop, then the base venv for baked console scripts. That means `python`, `jupyter`, `spark-submit`, `pyspark`, and `hadoop` work directly in a login shell without `source /opt/hailstack/overlay-venv/bin/activate`; Spark and Hadoop commands resolve to the configured `/opt/spark` and `/opt/hadoop` installs.
+
+### JupyterLab
+
+Open JupyterLab through nginx:
+
+```text
+https://<master-ip>/jupyter/
+```
+
+The basic-auth username is `hailstack` and the password is `HAILSTACK_WEB_PASSWORD`. Jupyter runs with the overlay Python, so notebooks can import baked packages such as Hail and gnomAD plus packages installed through `extras.python_packages` or `hailstack install --python`.
+
+### Python, Hail, And gnomAD
+
+From an SSH session, `python` is the overlay runtime and can import the baked scientific stack:
+
+```bash
+python - <<'PY'
+import hail as hl
+import gnomad
+
+print(hl.__version__)
+print(gnomad.__name__)
+PY
+```
+
+For repeatable cluster-wide Python additions, set `extras.python_packages` before `create` or use `hailstack install --python <package>` after the cluster exists. Both paths install into `HAILSTACK_OVERLAY_VENV`; do not install extra packages into `HAILSTACK_BASE_VENV`.
+
+### Spark And Hadoop
+
+Spark and Hadoop commands are on `PATH` for SSH users:
+
+```bash
+spark-submit my_job.py
+pyspark
+hadoop fs -ls /
+```
+
+PySpark uses `PYSPARK_PYTHON`, so driver and executor Python code run through the same overlay runtime. If Spark or Hadoop jobs need S3A access, configure the `[s3]` values before `create` so Hadoop's `core-site.xml` contains the data-bucket credentials.
+
 ## Configuration Reference
 
 The CLI reads TOML with `tomllib`, substitutes `$VAR` and `${VAR}` in string values, optionally loads a `.env` file before parsing, and then validates the result with Pydantic. Defaults below are the current implementation defaults, not recommendations.
