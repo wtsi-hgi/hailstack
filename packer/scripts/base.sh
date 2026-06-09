@@ -43,6 +43,34 @@ BASE_PURELIB=$(/opt/hailstack/base-venv/bin/python -c "import sysconfig; print(s
 OVERLAY_PURELIB=$(/opt/hailstack/overlay-venv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
 printf '%s\n' "${BASE_PURELIB}" > "${OVERLAY_PURELIB}/hailstack-base-venv.pth"
 
+install -d -m 0755 /etc/profile.d
+cat >/etc/profile.d/hailstack.sh <<'EOF'
+# Hailstack cluster runtime for interactive login shells.
+export HAILSTACK_BASE_VENV=/opt/hailstack/base-venv
+export HAILSTACK_OVERLAY_VENV=/opt/hailstack/overlay-venv
+export HAILSTACK_RUNTIME_PYTHON=/opt/hailstack/overlay-venv/bin/python
+export SPARK_HOME=/opt/spark
+export HADOOP_HOME=/opt/hadoop
+export PYSPARK_PYTHON=/opt/hailstack/overlay-venv/bin/python
+
+hailstack_prepend_path() {
+	case ":${PATH:-}:" in
+		*":$1:"*) ;;
+		*) PATH="$1${PATH:+:$PATH}" ;;
+	esac
+}
+
+hailstack_prepend_path "${HAILSTACK_BASE_VENV}/bin"
+hailstack_prepend_path "${HADOOP_HOME}/sbin"
+hailstack_prepend_path "${HADOOP_HOME}/bin"
+hailstack_prepend_path "${SPARK_HOME}/sbin"
+hailstack_prepend_path "${SPARK_HOME}/bin"
+hailstack_prepend_path "${HAILSTACK_OVERLAY_VENV}/bin"
+export PATH
+unset -f hailstack_prepend_path
+EOF
+chmod 0644 /etc/profile.d/hailstack.sh
+
 cat >/etc/systemd/system/jupyter-lab.service <<'EOF'
 [Unit]
 Description=Hailstack JupyterLab
@@ -61,5 +89,6 @@ EOF
 systemctl daemon-reload
 test -d /opt/hailstack/base-venv
 test -d /opt/hailstack/overlay-venv
+test -f /etc/profile.d/hailstack.sh
 test -f /etc/systemd/system/jupyter-lab.service
 test -f /lib/systemd/system/nginx.service || test -f /etc/systemd/system/nginx.service
