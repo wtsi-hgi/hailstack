@@ -377,6 +377,15 @@ class FakeAutomationEnvironment:
 
             return Result()
 
+        def fake_resolve_pulumi_cli(
+            runner: stack_module.AutomationStackRunner,
+        ) -> stack_module.PulumiCli:
+            del runner
+            return stack_module.PulumiCli(
+                path=Path("/opt/hailstack/bin/pulumi"),
+                version=stack_module.KNOWN_GOOD_PULUMI_CLI_VERSION,
+            )
+
         monkeypatch.setattr(
             stack_module.auto,
             "create_or_select_stack",
@@ -393,6 +402,11 @@ class FakeAutomationEnvironment:
             fake_select_stack,
         )
         monkeypatch.setattr(stack_module.subprocess, "run", fake_subprocess_run)
+        monkeypatch.setattr(
+            stack_module.AutomationStackRunner,
+            "_resolve_pulumi_cli",
+            fake_resolve_pulumi_cli,
+        )
 
     def run_program(self, program: Callable[[], None]) -> ProgramSnapshot:
         """Execute one Pulumi program with provider mocks and resolve exports."""
