@@ -38,7 +38,7 @@ There is currently no published `hailstack.sif` artifact. Pick one of the two in
 
 ### Option A — Run from a Python virtual environment (no Apptainer)
 
-This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulumi are already installed on your host (or you are happy to install them yourself). Hailstack uses the Pulumi CLI selected from `PATH`, and falls back to `~/.pulumi/bin/pulumi` when `PATH` does not contain one. Newer Pulumi releases use newer [AWS SDK S3 checksum behavior](https://docs.aws.amazon.com/sdkref/latest/guide/feature-dataintegrity.html) by default; Hailstack sets the AWS checksum compatibility variables needed by Ceph RGW for Pulumi backend login and Automation API operations. Pulumi CLI `3.226.0` remains a known-good fallback if a site-specific S3-compatible backend still rejects newer clients.
+This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulumi are already installed on your host (or you are happy to install them yourself). Latest Pulumi is normally desirable, but this Ceph RGW-backed Pulumi state path currently requires Pulumi CLI `3.226.0`. Remote create-path verification showed newer Pulumi/AWS SDK/Go Cloud S3 write paths can pass backend login and dry-run preview, then fail the first persisted stack lock write with `XAmzContentSHA256Mismatch`. Hailstack still defaults AWS checksum compatibility variables for clarity and compatibility, but those settings do not make latest Pulumi safe for this backend.
 
 1. Make sure the external tools are on `PATH`. Adjust the example below to match where your site keeps them, or install them from upstream:
 
@@ -49,8 +49,9 @@ This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulum
    export PATH="/path/to/pulumi:$PATH"
    export PATH="/path/to/ansible/venv/bin:$PATH"
 
-   # If Pulumi is not already site-managed, install the latest CLI.
-   curl -fsSL https://get.pulumi.com | sh
+   # If Pulumi is not already site-managed, install the CLI verified
+   # against this Ceph RGW create path.
+   curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0
    export PATH="$HOME/.pulumi/bin:$PATH"
    hash -r
 
@@ -58,12 +59,12 @@ This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulum
    python3.14 --version
    packer --version
    which pulumi
-   pulumi version
+   pulumi version  # should print v3.226.0
    ansible-playbook --version
    openstack --version   # from the python-openstackclient package
    ```
 
-   Hailstack can use `~/.pulumi/bin/pulumi` even if your active Python venv hides it from `PATH`, but keeping it on `PATH` makes manual `which pulumi` and `pulumi version` checks less surprising. If your site's S3-compatible Pulumi backend still fails with checksum errors after Hailstack's compatibility settings, install the known-good fallback with `curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0`.
+   Hailstack can use `~/.pulumi/bin/pulumi` even if your active Python venv hides it from `PATH`, but keeping it on `PATH` makes manual `which pulumi` and `pulumi version` checks less surprising. If both `PATH` and `~/.pulumi/bin/pulumi` contain Pulumi candidates, Hailstack prefers a discovered `3.226.0` binary. The old latest install command, `curl -fsSL https://get.pulumi.com | sh`, is not enough for this backend because it can install a newer CLI that passes login and dry-run checks but fails real create state writes.
 
 2. Clone the repository and install Hailstack into a local virtual environment:
 
@@ -583,8 +584,9 @@ Monitoring is controlled by `cluster.monitoring`.
 | `HAILSTACK_VOLUME_PASSWORD required when a data volume is attached`                        | A volume is enabled, but the LUKS passphrase is missing.                                                             | Add `HAILSTACK_VOLUME_PASSWORD` to your environment or disable the volume section.                                                          |
 | `OpenStack CLI not found`                                                                  | The host environment lacks the `openstack` client.                                                                   | Use the packaged container entrypoint or install the expected OpenStack CLI in the environment that runs Hailstack.                         |
 | `Network '<name>' not found`, missing image, or missing floating IP errors during `create` | Pre-flight resource checks failed.                                                                                   | Verify `cluster.network_name`, `cluster.lustre_network`, the built image name `hailstack-<bundle-id>`, and any fixed `cluster.floating_ip`. |
-| `Pulumi Automation API requires Pulumi CLI 3.1.0 or newer`                                 | `PATH` or `~/.pulumi/bin/pulumi` points at a very old Pulumi CLI.                                                     | Run `which pulumi` and `pulumi version`; update Pulumi with `curl -fsSL https://get.pulumi.com \| sh`, or use the known-good fallback `curl -fsSL https://get.pulumi.com \| sh -s -- --version 3.226.0`. |
-| Pulumi backend errors containing `XAmzContentSHA256Mismatch` while Hailstack reports `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` | The S3-compatible backend still rejects newer AWS SDK checksum behavior even after Hailstack's compatibility defaults. | Keep the raw S3 error for your site administrator, then try the known-good Pulumi CLI fallback `3.226.0`; Hailstack checks `PATH` first and `~/.pulumi/bin/pulumi` when `PATH` misses it. |
+| `Pulumi Automation API requires Pulumi CLI 3.1.0 or newer`                                 | `PATH` or `~/.pulumi/bin/pulumi` points at a very old Pulumi CLI.                                                     | Run `which pulumi` and `pulumi version`; install the known-good CLI with `curl -fsSL https://get.pulumi.com \| sh -s -- --version 3.226.0`. |
+| `requires known-good Pulumi CLI 3.226.0 for persisted stack writes`                        | Hailstack selected a Pulumi CLI other than `3.226.0`. Newer clients can pass backend login and dry-run preview but fail the real create lock write with `XAmzContentSHA256Mismatch`. | Install `3.226.0` with `curl -fsSL https://get.pulumi.com \| sh -s -- --version 3.226.0`, then confirm `which pulumi` and `pulumi version`; Hailstack also checks `~/.pulumi/bin/pulumi` and prefers a discovered `3.226.0`. |
+| Pulumi backend errors containing `XAmzContentSHA256Mismatch` while using Pulumi `3.226.0`  | The Ceph RGW backend is still rejecting Pulumi state writes even on the known-good CLI.                              | Keep the raw S3 error for your site administrator; this needs site/backend attention rather than a latest-Pulumi retry.                    |
 | `SignatureDoesNotMatch` while Hailstack reports the checksum compatibility variables       | The Ceph state-bucket access key or secret key is probably wrong.                                                     | Check the `ceph_s3.access_key` / `ceph_s3.secret_key` values loaded from your config and `--dotenv`; compare them with `CEPH_S3_ACCESS_KEY` / `CEPH_S3_SECRET_KEY` and watch for extra characters. |
 | Pulumi asks for `PULUMI_CONFIG_PASSPHRASE` during first-time `create`                      | Hailstack is not supplying its normal automatic Pulumi passphrase, or a custom Pulumi secrets setup is incomplete.    | Upgrade Hailstack and confirm the `ceph_s3` state-bucket credentials load from your config or `.env`; most users should not set Pulumi passphrase variables manually. |
 | `Timed out waiting for SSH connectivity to return` during `reboot`                         | The worker did not come back cleanly after reboot or SSH access is blocked.                                          | Check the instance console, confirm the security-group SSH setting, and verify the configured `cluster.ssh_username`.                       |

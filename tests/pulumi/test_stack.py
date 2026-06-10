@@ -808,11 +808,11 @@ def test_persisted_create_uses_resolved_pulumi_command(
     assert captured_commands == [str(pulumi_path)]
 
 
-def test_backend_access_prefers_path_pulumi_when_home_also_available(
+def test_backend_access_prefers_known_good_home_pulumi_when_path_is_newer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Respect the user's PATH-selected Pulumi CLI before home fallback."""
+    """Prefer discovered Pulumi 3.226.0 over a newer PATH candidate."""
     path_pulumi = tmp_path / "tools" / "bin" / "pulumi"
     path_pulumi.parent.mkdir(parents=True)
     path_pulumi.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -845,8 +845,9 @@ def test_backend_access_prefers_path_pulumi_when_home_also_available(
 
     assert captured_args == [
         [str(path_pulumi), "version"],
+        [str(home_pulumi), "version"],
         [
-            str(path_pulumi),
+            str(home_pulumi),
             "login",
             "--non-interactive",
             "s3://hailstack-state?endpoint=https://ceph.example.invalid",
@@ -915,11 +916,29 @@ def test_resolved_pulumi_command_rejects_too_old_cli() -> None:
     assert "/opt/hailstack/bin/pulumi (v3.0.0)" in message
 
 
-def test_backend_access_allows_newer_cli_after_successful_login(
+def test_resolved_pulumi_command_rejects_newer_cli_before_automation() -> None:
+    """Reject unsupported Pulumi before preview/up/destroy commands run."""
+    with pytest.raises(PulumiError) as exc_info:
+        stack_module._ResolvedPulumiCommand(
+            stack_module.PulumiCli(
+                path=Path("/opt/hailstack/bin/pulumi"),
+                version="3.245.0",
+            )
+        )
+
+    message = str(exc_info.value)
+    assert "Hailstack selected Pulumi CLI /opt/hailstack/bin/pulumi (v3.245.0)" in (
+        message
+    )
+    assert "requires known-good Pulumi CLI 3.226.0" in message
+    assert "persisted stack writes" in message
+
+
+def test_backend_access_rejects_newer_cli_after_successful_login_before_automation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Let newer Pulumi CLIs proceed when checksum compatibility works."""
+    """Reject newer Pulumi after login before persisted Automation writes."""
     pulumi_path = tmp_path / "tools" / "bin" / "pulumi"
     pulumi_path.parent.mkdir(parents=True)
     pulumi_path.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -927,6 +946,7 @@ def test_backend_access_allows_newer_cli_after_successful_login(
     monkeypatch.setenv("PATH", str(pulumi_path.parent))
     captured_args: list[list[str]] = []
     captured_envs: list[dict[str, str]] = []
+    automation_calls: list[str] = []
 
     def fake_run(
         args: list[str],
@@ -944,10 +964,30 @@ def test_backend_access_allows_newer_cli_after_successful_login(
         captured_envs.append(env)
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
+    def fake_create_or_select_stack(**kwargs: object) -> FakeAutoStack:
+        del kwargs
+        automation_calls.append("create_or_select")
+        return FakeAutoStack()
+
     monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        stack_module.auto,
+        "create_or_select_stack",
+        fake_create_or_select_stack,
+    )
 
-    stack_module.AutomationStackRunner().check_backend_access(_config())
+    runner = stack_module.AutomationStackRunner()
 
+    with pytest.raises(PulumiError) as exc_info:
+        runner.check_backend_access(_config())
+        runner.up(_config(), cast(Bundle, SimpleNamespace(id="bundle-id")))
+
+    message = str(exc_info.value)
+    assert f"Hailstack selected Pulumi CLI {pulumi_path} (v3.245.0)" in message
+    assert "requires known-good Pulumi CLI 3.226.0" in message
+    assert "persisted stack writes" in message
+    assert "XAmzContentSHA256Mismatch" in message
+    assert "curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0" in message
     assert captured_args == [
         [str(pulumi_path), "version"],
         [
@@ -959,6 +999,7 @@ def test_backend_access_allows_newer_cli_after_successful_login(
     ]
     assert captured_envs[0]["AWS_REQUEST_CHECKSUM_CALCULATION"] == "when_required"
     assert captured_envs[0]["AWS_RESPONSE_CHECKSUM_VALIDATION"] == "when_required"
+    assert automation_calls == []
 
 
 @pytest.mark.parametrize("version_output", ["", "definitely-not-semver"])
@@ -1025,7 +1066,7 @@ def test_backend_access_rejects_unparseable_cli_version_before_automation(
     assert automation_versions == []
 
 
-def test_backend_access_checksum_mismatch_with_newer_cli_hints_fallback(
+def test_backend_access_checksum_mismatch_with_newer_cli_requires_known_good(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1069,14 +1110,15 @@ def test_backend_access_checksum_mismatch_with_newer_cli_hints_fallback(
     assert f"Hailstack used Pulumi CLI {pulumi_path} (v3.245.0)" in message
     assert "AWS_REQUEST_CHECKSUM_CALCULATION=when_required" in message
     assert "AWS_RESPONSE_CHECKSUM_VALIDATION=when_required" in message
-    assert "fall back to the known-good Pulumi CLI 3.226.0" in message
+    assert "requires known-good Pulumi CLI 3.226.0" in message
+    assert "curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0" in message
 
 
-def test_backend_access_signature_mismatch_with_checksum_vars_hints_credentials(
+def test_backend_access_checksum_mismatch_with_known_good_cli_preserves_raw_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Treat signatures with checksum compatibility as likely bad S3 secrets."""
+    """Escalate checksum mismatches that still happen with Pulumi 3.226.0."""
     pulumi_path = tmp_path / "tools" / "bin" / "pulumi"
     pulumi_path.parent.mkdir(parents=True)
     pulumi_path.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1094,7 +1136,56 @@ def test_backend_access_signature_mismatch_with_checksum_vars_hints_credentials(
     ) -> object:
         del capture_output, check, cwd, env, text
         if args == [str(pulumi_path), "version"]:
-            return SimpleNamespace(returncode=0, stderr="", stdout="v3.245.0\n")
+            return SimpleNamespace(returncode=0, stderr="", stdout="v3.226.0\n")
+        return SimpleNamespace(
+            returncode=1,
+            stderr=(
+                "error: could not create stack lock: PutObject: "
+                "XAmzContentSHA256Mismatch"
+            ),
+            stdout="",
+        )
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    with pytest.raises(S3Error) as exc_info:
+        stack_module.AutomationStackRunner().check_backend_access(
+            _config(endpoint="https://cog.sanger.ac.uk/")
+        )
+
+    message = str(exc_info.value)
+    assert (
+        "could not create stack lock: PutObject: XAmzContentSHA256Mismatch" in message
+    )
+    assert f"Hailstack used Pulumi CLI {pulumi_path} (v3.226.0)" in message
+    assert "backend is still rejecting Pulumi state writes" in message
+    assert "site administrator" in message
+    assert "sh -s -- --version 3.226.0" not in message
+
+
+def test_backend_access_signature_mismatch_with_checksum_vars_hints_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Treat signatures under Pulumi 3.226.0 as likely bad S3 secrets."""
+    pulumi_path = tmp_path / "tools" / "bin" / "pulumi"
+    pulumi_path.parent.mkdir(parents=True)
+    pulumi_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    pulumi_path.chmod(0o700)
+    monkeypatch.setenv("PATH", str(pulumi_path.parent))
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del capture_output, check, cwd, env, text
+        if args == [str(pulumi_path), "version"]:
+            return SimpleNamespace(returncode=0, stderr="", stdout="v3.226.0\n")
         return SimpleNamespace(
             returncode=1,
             stderr=(
@@ -1113,7 +1204,7 @@ def test_backend_access_signature_mismatch_with_checksum_vars_hints_credentials(
 
     message = str(exc_info.value)
     assert "SignatureDoesNotMatch" in message
-    assert f"Hailstack used Pulumi CLI {pulumi_path} (v3.245.0)" in message
+    assert f"Hailstack used Pulumi CLI {pulumi_path} (v3.226.0)" in message
     assert "AWS_REQUEST_CHECKSUM_CALCULATION=when_required" in message
     assert "AWS_RESPONSE_CHECKSUM_VALIDATION=when_required" in message
     assert "check the Ceph S3 state-bucket credentials" in message

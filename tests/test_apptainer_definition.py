@@ -142,7 +142,7 @@ def test_m1_acceptance_3_sif_contains_pulumi_packer_and_ansible_executables() ->
 
 
 def test_apptainer_installs_known_good_pulumi_cli_version() -> None:
-    """Pin the container Pulumi CLI to the known-good Ceph fallback version."""
+    """Pin the container Pulumi CLI to the known-good Ceph version."""
     from hailstack.tool_versions import KNOWN_GOOD_PULUMI_CLI_VERSION
 
     definition = _read_definition()
