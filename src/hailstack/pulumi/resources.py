@@ -24,7 +24,7 @@
 """Pulumi OpenStack resource graph creation for Hailstack clusters."""
 
 from collections.abc import Sequence
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pulumi
 from pulumi_openstack.blockstorage.volume import Volume
@@ -306,6 +306,9 @@ def create_cluster_resources(
 
 def _lookup_network_id(name: str) -> str:
     """Resolve a required OpenStack network name to its ID."""
+    if _is_uuid(name):
+        return name
+
     try:
         network = get_network(name=name)
     except Exception as error:  # pragma: no cover - provider failures handled uniformly
@@ -319,6 +322,15 @@ def _lookup_optional_network_id(name: str) -> str | None:
     if not normalized_name:
         return None
     return _lookup_network_id(normalized_name)
+
+
+def _is_uuid(value: str) -> bool:
+    """Return whether a string is already a UUID-shaped network ID."""
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _create_public_rules(

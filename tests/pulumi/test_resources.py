@@ -783,6 +783,39 @@ def test_lustre_ports_omit_security_groups_and_port_security_override(
     assert all("port_security_enabled" not in port for port in lustre_ports)
 
 
+def test_lustre_network_uuid_is_used_without_provider_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use already-resolved Lustre network UUIDs directly in Pulumi ports."""
+    lustre_network_id = "84eb7e1b-0c70-46da-ab28-c0098dcd6e50"
+    config = _config(
+        cluster={
+            "name": "test-cluster",
+            "bundle": "hail-0.2.137-gnomad-3.0.4-r2",
+            "num_workers": 3,
+            "master_flavour": "m2.2xlarge",
+            "worker_flavour": "m2.xlarge",
+            "network_name": "private-net",
+            "lustre_network": lustre_network_id,
+            "ssh_username": "ubuntu",
+            "floating_ip": "",
+        }
+    )
+
+    mocks, _, _ = _run_stack(config, monkeypatch)
+    network_lookups = [
+        invoke["args"]["name"]
+        for invoke in mocks.invokes
+        if invoke["token"] == "openstack:networking/getNetwork:getNetwork"
+    ]
+    ports = _resource_inputs(mocks, "openstack:networking/port:Port")
+    lustre_ports = [port for port in ports if "lustre-port" in str(port["name"])]
+
+    assert network_lookups == ["private-net"]
+    assert len(lustre_ports) == 4
+    assert all(port["network_id"] == lustre_network_id for port in lustre_ports)
+
+
 def test_empty_floating_ip_allocates_new_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
