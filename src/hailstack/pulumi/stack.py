@@ -41,6 +41,7 @@ from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
 
 REPOSITORY_ROOT = RUNTIME_WORK_DIR
 S3_CHECKSUM_MISMATCH_ERROR = "XAmzContentSHA256Mismatch"
+S3_SIGNATURE_MISMATCH_ERROR = "SignatureDoesNotMatch"
 
 
 @dataclass(frozen=True)
@@ -408,12 +409,15 @@ def _set_default_s3_region(env: dict[str, str]) -> None:
 
 
 def _add_supported_pulumi_hint(detail: str) -> str:
-    """Add a supported-version hint for known Ceph checksum failures."""
-    if S3_CHECKSUM_MISMATCH_ERROR not in detail:
+    """Add a supported-version hint for known Ceph backend failures."""
+    if not any(
+        error_code in detail
+        for error_code in (S3_CHECKSUM_MISMATCH_ERROR, S3_SIGNATURE_MISMATCH_ERROR)
+    ):
         return detail
     hint = (
         f"Use Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}; newer Pulumi CLI versions "
-        "may fail this Ceph backend with checksum mismatch."
+        "may fail this Ceph backend with checksum or signature mismatch."
     )
     return f"{detail} Hint: {hint}"
 

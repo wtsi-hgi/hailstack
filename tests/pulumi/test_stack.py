@@ -620,6 +620,44 @@ def test_backend_access_checksum_mismatch_hints_supported_pulumi_version(
     assert "newer Pulumi CLI versions may fail" in message
 
 
+def test_backend_access_signature_mismatch_hints_supported_pulumi_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explain known Ceph signature mismatches with the supported Pulumi version."""
+    from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del args, capture_output, check, cwd, env, text
+        return SimpleNamespace(
+            returncode=1,
+            stderr=(
+                'error: problem logging in: read ".pulumi/meta.yaml": '
+                "StatusCode: 403, api error SignatureDoesNotMatch: UnknownError"
+            ),
+            stdout="",
+        )
+
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    with pytest.raises(S3Error) as exc_info:
+        stack_module.AutomationStackRunner().check_backend_access(
+            _config(endpoint="cog.sanger.ac.uk")
+        )
+
+    message = str(exc_info.value)
+    assert "SignatureDoesNotMatch" in message
+    assert f"Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}" in message
+    assert "newer Pulumi CLI versions may fail" in message
+
+
 def test_pulumi_env_uses_caller_s3_region(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
