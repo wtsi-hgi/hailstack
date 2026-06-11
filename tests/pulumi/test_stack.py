@@ -855,6 +855,52 @@ def test_backend_access_prefers_known_good_home_pulumi_when_path_is_newer(
     ]
 
 
+def test_backend_access_uses_path_pulumi_when_home_is_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skip the home Pulumi fallback when the home directory cannot resolve."""
+    path_pulumi = tmp_path / "tools" / "bin" / "pulumi"
+    path_pulumi.parent.mkdir(parents=True)
+    path_pulumi.write_text("#!/bin/sh\n", encoding="utf-8")
+    path_pulumi.chmod(0o700)
+    monkeypatch.setenv("PATH", str(path_pulumi.parent))
+    captured_args: list[list[str]] = []
+
+    def raise_home() -> Path:
+        raise RuntimeError("home directory is unavailable")
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        cwd: object,
+        env: dict[str, str],
+        text: bool,
+    ) -> object:
+        del capture_output, check, cwd, env, text
+        captured_args.append(args)
+        if args == [str(path_pulumi), "version"]:
+            return SimpleNamespace(returncode=0, stderr="", stdout="v3.226.0\n")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(stack_module.Path, "home", raise_home)
+    monkeypatch.setattr(stack_module.subprocess, "run", fake_run)
+
+    stack_module.AutomationStackRunner().check_backend_access(_config())
+
+    assert captured_args == [
+        [str(path_pulumi), "version"],
+        [
+            str(path_pulumi),
+            "login",
+            "--non-interactive",
+            "s3://hailstack-state?endpoint=https://ceph.example.invalid",
+        ],
+    ]
+
+
 def test_real_stack_preview_reaches_resolved_pulumi_command(
     tmp_path: Path,
 ) -> None:

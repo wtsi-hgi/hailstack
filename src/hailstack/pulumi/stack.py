@@ -572,8 +572,15 @@ def _pulumi_cli_candidates() -> list[Path]:
     if path_pulumi is not None:
         candidates.append(Path(path_pulumi))
 
-    home_pulumi = Path.home() / ".pulumi" / "bin" / "pulumi"
-    if home_pulumi.is_file() and os.access(home_pulumi, os.X_OK):
+    try:
+        home_pulumi = Path.home() / ".pulumi" / "bin" / "pulumi"
+    except RuntimeError:
+        home_pulumi = None
+    if (
+        home_pulumi is not None
+        and home_pulumi.is_file()
+        and os.access(home_pulumi, os.X_OK)
+    ):
         candidates.append(home_pulumi)
 
     deduped_candidates: list[Path] = []
