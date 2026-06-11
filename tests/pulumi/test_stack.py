@@ -31,7 +31,6 @@ from typing import cast
 
 import pytest
 from pulumi import automation as auto
-from pulumi.automation._stack import StackInitMode
 from semver import VersionInfo
 
 from hailstack.config import Bundle, ClusterConfig
@@ -193,12 +192,22 @@ def _real_stack_with_recording_command(
 ) -> tuple[auto.Stack, RecordingPulumiCommand]:
     """Return a real Automation API stack backed by a recording command."""
     command = RecordingPulumiCommand()
-    workspace = auto.LocalWorkspace(
+
+    def noop_program() -> None:
+        return
+
+    selected_program = program or noop_program
+    workspace_options = auto.LocalWorkspaceOptions(
         work_dir=str(tmp_path),
-        program=program,
+        program=selected_program,
         pulumi_command=command,
     )
-    stack = auto.Stack("hailstack-test-cluster", workspace, StackInitMode.SELECT)
+    stack = auto.select_stack(
+        stack_name="hailstack-test-cluster",
+        project_name="hailstack",
+        program=selected_program,
+        opts=workspace_options,
+    )
     command.calls.clear()
     return stack, command
 
