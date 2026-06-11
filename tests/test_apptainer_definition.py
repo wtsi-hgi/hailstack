@@ -141,16 +141,16 @@ def test_m1_acceptance_3_sif_contains_pulumi_packer_and_ansible_executables() ->
     )
 
 
-def test_apptainer_installs_supported_pulumi_cli_version() -> None:
-    """Pin the container Pulumi CLI to the supported Ceph-compatible version."""
-    from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+def test_apptainer_installs_known_good_pulumi_cli_version() -> None:
+    """Pin the container Pulumi CLI to the known-good Ceph version."""
+    from hailstack.tool_versions import KNOWN_GOOD_PULUMI_CLI_VERSION
 
     definition = _read_definition()
     post_section = _section(definition, "post")
 
-    assert SUPPORTED_PULUMI_CLI_VERSION == "3.226.0"
+    assert KNOWN_GOOD_PULUMI_CLI_VERSION == "3.226.0"
     assert (
-        "from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION"
+        "from hailstack.tool_versions import KNOWN_GOOD_PULUMI_CLI_VERSION"
         in post_section
     )
     assert 'sh -s -- --version "${PULUMI_VERSION}"' in post_section

@@ -26,21 +26,34 @@
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from pulumi import automation as auto
+from semver import VersionInfo
 
 from hailstack.config import Bundle, ClusterConfig
 from hailstack.errors import PulumiError, S3Error
 from hailstack.pulumi.resources import create_cluster_resources
 from hailstack.runtime_paths import RUNTIME_WORK_DIR, runtime_work_dir
-from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION
+from hailstack.tool_versions import (
+    KNOWN_GOOD_PULUMI_CLI_VERSION,
+    MINIMUM_PULUMI_AUTOMATION_CLI_VERSION,
+)
 
 REPOSITORY_ROOT = RUNTIME_WORK_DIR
 S3_CHECKSUM_MISMATCH_ERROR = "XAmzContentSHA256Mismatch"
+S3_SIGNATURE_MISMATCH_ERROR = "SignatureDoesNotMatch"
+S3_CHECKSUM_COMPATIBILITY_VALUE = "when_required"
+S3_REQUEST_CHECKSUM_ENV = "AWS_REQUEST_CHECKSUM_CALCULATION"
+S3_RESPONSE_CHECKSUM_ENV = "AWS_RESPONSE_CHECKSUM_VALIDATION"
+KNOWN_GOOD_PULUMI_INSTALL_COMMAND = (
+    "curl -fsSL https://get.pulumi.com | sh -s -- --version "
+    f"{KNOWN_GOOD_PULUMI_CLI_VERSION}"
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +62,45 @@ class CreateResult:
 
     master_public_ip: str
     stdout: str = ""
+
+
+@dataclass(frozen=True)
+class PulumiCli:
+    """Describe the Pulumi CLI executable selected for this runner."""
+
+    path: Path
+    version: str
+
+    @property
+    def command(self) -> str:
+        """Return the executable command passed to subprocesses."""
+        return str(self.path)
+
+    @property
+    def display_version(self) -> str:
+        """Return a human-readable Pulumi version."""
+        if self.version == "unknown":
+            return "unknown"
+        return f"v{self.version}"
+
+    @property
+    def parsed_version(self) -> VersionInfo | None:
+        """Return the parsed Pulumi version when the CLI reported one."""
+        return _parse_pulumi_cli_version(self.version)
+
+    @property
+    def is_known_good(self) -> bool:
+        """Return whether this CLI matches Hailstack's known-good version."""
+        return self.version == KNOWN_GOOD_PULUMI_CLI_VERSION
+
+
+class _ResolvedPulumiCommand(auto.PulumiCommand):
+    """Run Pulumi automation with an already resolved executable path."""
+
+    def __init__(self, cli: PulumiCli) -> None:
+        """Initialise without asking PulumiCommand to search PATH again."""
+        self.command = cli.command
+        self.version = _ensure_pulumi_ceph_backend_cli_supported(cli)
 
 
 class AutomationStackRunner:
@@ -65,14 +117,16 @@ class AutomationStackRunner:
         self._work_dir = (
             runtime_work_dir() if work_dir == RUNTIME_WORK_DIR else work_dir
         )
+        self._resolved_pulumi_cli: PulumiCli | None = None
 
     def check_backend_access(self, config: ClusterConfig) -> None:
         """Validate that the configured Ceph S3 backend accepts authentication."""
         env = self._pulumi_env(config)
         backend_url = self._backend_url(config)
+        pulumi_cli = self._pulumi_cli()
         try:
             result = subprocess.run(
-                ["pulumi", "login", "--non-interactive", backend_url],
+                [pulumi_cli.command, "login", "--non-interactive", backend_url],
                 capture_output=True,
                 check=False,
                 cwd=self._work_dir,
@@ -80,15 +134,16 @@ class AutomationStackRunner:
                 text=True,
             )
         except FileNotFoundError as error:
-            raise PulumiError("Pulumi CLI not found") from error
+            raise PulumiError(_pulumi_not_found_message()) from error
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            detail = _add_supported_pulumi_hint(detail)
+            detail = _add_pulumi_backend_hint(detail, pulumi_cli, env)
             endpoint = config.ceph_s3.endpoint.removeprefix("https://").removeprefix(
                 "http://"
             )
             raise S3Error(f"Unable to access Ceph S3 backend at {endpoint}: {detail}")
+        _ensure_pulumi_ceph_backend_cli_supported(pulumi_cli)
 
     def cli_env(self, config: ClusterConfig) -> dict[str, str]:
         """Return the environment for Pulumi CLI commands run outside automation."""
@@ -160,6 +215,7 @@ class AutomationStackRunner:
                     backend=auto.ProjectBackend(url=f"file://{temp_dir}"),
                 ),
                 work_dir=str(self._work_dir),
+                pulumi_command=self._pulumi_command(),
             )
             try:
                 stack = auto.create_stack(
@@ -323,6 +379,7 @@ class AutomationStackRunner:
                 backend=auto.ProjectBackend(url=self._backend_url(config)),
             ),
             work_dir=str(self._work_dir),
+            pulumi_command=self._pulumi_command(),
         )
 
         try:
@@ -360,6 +417,7 @@ class AutomationStackRunner:
         env["AWS_ACCESS_KEY_ID"] = config.ceph_s3.access_key
         env["AWS_SECRET_ACCESS_KEY"] = config.ceph_s3.secret_key
         _set_default_s3_region(env)
+        _set_default_s3_checksum_compatibility(env)
         env.setdefault("PULUMI_HOME", str(self._pulumi_home()))
         if (
             "PULUMI_CONFIG_PASSPHRASE" not in env
@@ -372,6 +430,56 @@ class AutomationStackRunner:
         """Return a workspace-scoped Pulumi home that avoids global backend state."""
         workspace_hash = hashlib.sha256(str(self._work_dir).encode("utf-8")).hexdigest()
         return Path(tempfile.gettempdir()) / "hailstack-pulumi-home" / workspace_hash
+
+    def _pulumi_cli(self) -> PulumiCli:
+        """Return the cached Pulumi CLI selected for this runner."""
+        if self._resolved_pulumi_cli is None:
+            self._resolved_pulumi_cli = self._resolve_pulumi_cli()
+        return self._resolved_pulumi_cli
+
+    def _pulumi_command(self) -> auto.PulumiCommand:
+        """Return the Pulumi command object used by Automation API calls."""
+        return _ResolvedPulumiCommand(self._pulumi_cli())
+
+    def _resolve_pulumi_cli(self) -> PulumiCli:
+        """Select a Pulumi CLI from PATH with a home-directory fallback."""
+        selected_cli: PulumiCli | None = None
+        for candidate in _pulumi_cli_candidates():
+            cli = PulumiCli(
+                path=candidate,
+                version=self._pulumi_cli_version(candidate),
+            )
+            if selected_cli is None:
+                selected_cli = cli
+            if cli.is_known_good:
+                return cli
+
+        if selected_cli is not None:
+            return selected_cli
+
+        return PulumiCli(path=Path("pulumi"), version="unknown")
+
+    def _pulumi_cli_version(self, path: Path) -> str:
+        """Return the normalised version reported by a Pulumi executable."""
+        env = dict(os.environ)
+        env["PULUMI_SKIP_UPDATE_CHECK"] = "true"
+        try:
+            result = subprocess.run(
+                [str(path), "version"],
+                capture_output=True,
+                check=False,
+                cwd=self._work_dir,
+                env=env,
+                text=True,
+            )
+        except OSError:
+            return "unknown"
+        if result.returncode != 0:
+            return "unknown"
+        output = result.stdout.strip() or result.stderr.strip()
+        if not output:
+            return "unknown"
+        return output.splitlines()[0].strip().removeprefix("v") or "unknown"
 
     @staticmethod
     def _master_public_ip(outputs: auto.OutputMap) -> str:
@@ -407,15 +515,161 @@ def _set_default_s3_region(env: dict[str, str]) -> None:
         env["AWS_DEFAULT_REGION"] = region
 
 
-def _add_supported_pulumi_hint(detail: str) -> str:
-    """Add a supported-version hint for known Ceph checksum failures."""
-    if S3_CHECKSUM_MISMATCH_ERROR not in detail:
+def _set_default_s3_checksum_compatibility(env: dict[str, str]) -> None:
+    """Default newer AWS SDK S3 checksum behavior to Ceph-compatible settings."""
+    env.setdefault(S3_REQUEST_CHECKSUM_ENV, S3_CHECKSUM_COMPATIBILITY_VALUE)
+    env.setdefault(S3_RESPONSE_CHECKSUM_ENV, S3_CHECKSUM_COMPATIBILITY_VALUE)
+
+
+def _parse_pulumi_cli_version(version: str) -> VersionInfo | None:
+    """Return Pulumi's parsed semver object when the CLI version is known."""
+    if version == "unknown":
+        return None
+    try:
+        return VersionInfo.parse(version)
+    except ValueError:
+        return None
+
+
+def _ensure_pulumi_automation_cli_compatible(cli: PulumiCli) -> VersionInfo:
+    """Return the parsed CLI version or raise a clear Automation API error."""
+    parsed_version = cli.parsed_version
+    if parsed_version is None:
+        raise PulumiError(
+            f"Hailstack selected Pulumi CLI {cli.command} ({cli.display_version}), "
+            "but could not determine a parseable Pulumi CLI version from "
+            "`pulumi version`. Pulumi Automation API requires Pulumi CLI "
+            f"{MINIMUM_PULUMI_AUTOMATION_CLI_VERSION} or newer. Check that this "
+            "Pulumi executable runs correctly. For this Ceph RGW-backed Pulumi "
+            f"state path, install {KNOWN_GOOD_PULUMI_CLI_VERSION} with: "
+            f"{KNOWN_GOOD_PULUMI_INSTALL_COMMAND}."
+        )
+    minimum_version = VersionInfo.parse(MINIMUM_PULUMI_AUTOMATION_CLI_VERSION)
+    if minimum_version.compare(parsed_version) <= 0:
+        return parsed_version
+    raise PulumiError(
+        f"Hailstack selected Pulumi CLI {cli.command} ({cli.display_version}), "
+        "but Pulumi Automation API requires Pulumi CLI "
+        f"{MINIMUM_PULUMI_AUTOMATION_CLI_VERSION} or newer. Update Pulumi; "
+        "this Ceph RGW-backed Pulumi state path requires known-good Pulumi "
+        f"CLI {KNOWN_GOOD_PULUMI_CLI_VERSION}. Install it with: "
+        f"{KNOWN_GOOD_PULUMI_INSTALL_COMMAND}."
+    )
+
+
+def _ensure_pulumi_ceph_backend_cli_supported(cli: PulumiCli) -> VersionInfo:
+    """Return the parsed version when the CLI is safe for this Ceph backend."""
+    parsed_version = _ensure_pulumi_automation_cli_compatible(cli)
+    if cli.is_known_good:
+        return parsed_version
+    raise PulumiError(_unsupported_pulumi_cli_message(cli))
+
+
+def _pulumi_cli_candidates() -> list[Path]:
+    """Return discoverable Pulumi CLI paths in deterministic preference order."""
+    candidates: list[Path] = []
+    path_pulumi = shutil.which("pulumi")
+    if path_pulumi is not None:
+        candidates.append(Path(path_pulumi))
+
+    try:
+        home_pulumi = Path.home() / ".pulumi" / "bin" / "pulumi"
+    except RuntimeError:
+        home_pulumi = None
+    if (
+        home_pulumi is not None
+        and home_pulumi.is_file()
+        and os.access(home_pulumi, os.X_OK)
+    ):
+        candidates.append(home_pulumi)
+
+    deduped_candidates: list[Path] = []
+    seen_paths: set[Path] = set()
+    for candidate in candidates:
+        resolved_candidate = candidate.expanduser().resolve(strict=False)
+        if resolved_candidate not in seen_paths:
+            deduped_candidates.append(resolved_candidate)
+            seen_paths.add(resolved_candidate)
+    return deduped_candidates
+
+
+def _add_pulumi_backend_hint(
+    detail: str,
+    cli: PulumiCli,
+    env: dict[str, str],
+) -> str:
+    """Add checksum-aware guidance for known Ceph backend failures."""
+    if not any(
+        error_code in detail
+        for error_code in (S3_CHECKSUM_MISMATCH_ERROR, S3_SIGNATURE_MISMATCH_ERROR)
+    ):
         return detail
+    used = (
+        f"Hailstack used Pulumi CLI {cli.command} ({cli.display_version}) "
+        f"with {_s3_checksum_env_summary(env)}."
+    )
+    if S3_SIGNATURE_MISMATCH_ERROR in detail:
+        hint = (
+            f"{used} With the checksum settings shown above, signature mismatches "
+            "usually mean the Ceph S3 state-bucket credentials are wrong; check "
+            "the Ceph S3 state-bucket credentials loaded from "
+            "ceph_s3.access_key and ceph_s3.secret_key, including values "
+            "supplied through --dotenv."
+        )
+        return f"{detail} Hint: {hint}"
+
+    if cli.is_known_good:
+        hint = (
+            f"{used} This backend is still rejecting Pulumi state writes with "
+            f"{S3_CHECKSUM_MISMATCH_ERROR} even with known-good Pulumi CLI "
+            f"{KNOWN_GOOD_PULUMI_CLI_VERSION}. Preserve the raw S3 error and ask "
+            "a site administrator to inspect the Ceph RGW state-write path."
+        )
+        return f"{detail} Hint: {hint}"
+
     hint = (
-        f"Use Pulumi CLI {SUPPORTED_PULUMI_CLI_VERSION}; newer Pulumi CLI versions "
-        "may fail this Ceph backend with checksum mismatch."
+        f"{used} This Ceph RGW backend requires known-good Pulumi CLI "
+        f"{KNOWN_GOOD_PULUMI_CLI_VERSION} for persisted stack writes. Newer "
+        "Pulumi/AWS SDK/Go Cloud S3 write paths can still fail persisted stack "
+        f"lock writes with {S3_CHECKSUM_MISMATCH_ERROR}; checksum compatibility "
+        "settings help diagnose this backend but do not fix the lock PutObject "
+        f"path here. Install it with: {KNOWN_GOOD_PULUMI_INSTALL_COMMAND}."
     )
     return f"{detail} Hint: {hint}"
+
+
+def _s3_checksum_env_summary(env: dict[str, str]) -> str:
+    """Return the checksum environment values included in Pulumi diagnostics."""
+    return (
+        f"{S3_REQUEST_CHECKSUM_ENV}="
+        f"{env.get(S3_REQUEST_CHECKSUM_ENV, '<unset>')} and "
+        f"{S3_RESPONSE_CHECKSUM_ENV}="
+        f"{env.get(S3_RESPONSE_CHECKSUM_ENV, '<unset>')}"
+    )
+
+
+def _pulumi_not_found_message() -> str:
+    """Return the Pulumi CLI missing error."""
+    return (
+        "Pulumi CLI not found. Install Pulumi CLI or add it to PATH. Hailstack "
+        "also checks ~/.pulumi/bin/pulumi; this Ceph RGW-backed Pulumi state "
+        f"path requires known-good Pulumi CLI {KNOWN_GOOD_PULUMI_CLI_VERSION}. "
+        f"Install it with: {KNOWN_GOOD_PULUMI_INSTALL_COMMAND}."
+    )
+
+
+def _unsupported_pulumi_cli_message(cli: PulumiCli) -> str:
+    """Return guidance for Pulumi versions unsafe for persisted Ceph writes."""
+    return (
+        f"Hailstack selected Pulumi CLI {cli.command} ({cli.display_version}), "
+        "but this Ceph RGW-backed Pulumi state backend requires known-good "
+        f"Pulumi CLI {KNOWN_GOOD_PULUMI_CLI_VERSION} for persisted stack writes. "
+        "Newer Pulumi/AWS SDK/Go Cloud S3 write paths can pass backend login "
+        "and dry-run preview but still fail persisted stack lock writes with "
+        f"{S3_CHECKSUM_MISMATCH_ERROR}; checksum compatibility settings help "
+        "diagnose this backend but do not fix the lock PutObject path here. "
+        f"Install it with: {KNOWN_GOOD_PULUMI_INSTALL_COMMAND}."
+    )
 
 
 def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
@@ -429,6 +683,6 @@ def _requires_destroy_rehydration(config: ClusterConfig) -> bool:
 __all__ = [
     "AutomationStackRunner",
     "CreateResult",
+    "KNOWN_GOOD_PULUMI_CLI_VERSION",
     "REPOSITORY_ROOT",
-    "SUPPORTED_PULUMI_CLI_VERSION",
 ]

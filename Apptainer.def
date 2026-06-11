@@ -13,7 +13,7 @@ From: python:3.14-slim
 %post
   apt-get update && apt-get install -y \
     curl unzip openssh-client uuid-runtime gnupg
-  PULUMI_VERSION="$(PYTHONPATH=/opt/hailstack/src python3.14 -c 'from hailstack.tool_versions import SUPPORTED_PULUMI_CLI_VERSION; print(SUPPORTED_PULUMI_CLI_VERSION)')"
+  PULUMI_VERSION="$(PYTHONPATH=/opt/hailstack/src python3.14 -c 'from hailstack.tool_versions import KNOWN_GOOD_PULUMI_CLI_VERSION; print(KNOWN_GOOD_PULUMI_CLI_VERSION)')"
   curl -fsSL https://get.pulumi.com | sh -s -- --version "${PULUMI_VERSION}"
   install -d /usr/local/pulumi
   cp -a /root/.pulumi/. /usr/local/pulumi/
