@@ -34,39 +34,61 @@ Hailstack automatically provides a stable Pulumi stack passphrase from the confi
 
 ## Installation
 
-There is currently no published `hailstack.sif` artifact. Pick one of the two installation paths below.
+There is currently no published `hailstack` module or Singularity package to use. 
+Pick one of the three installation paths below.
 
-### Option A — Run from a Python virtual environment (no Apptainer)
+### Option A — Install with `uv`
 
-This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulumi are already installed on your host (or you are happy to install them yourself). Latest Pulumi is normally desirable, but this Ceph RGW-backed Pulumi state path currently requires Pulumi CLI `3.226.0`. Remote create-path verification showed newer Pulumi/AWS SDK/Go Cloud S3 write paths can pass backend login and dry-run preview, then fail the first persisted stack lock write with `XAmzContentSHA256Mismatch`. Hailstack still defaults AWS checksum compatibility variables for clarity and compatibility, but those settings do not make latest Pulumi safe for this backend.
+This is the recommended local installation path. 
+It creates a project-managed virtual environment with `uv` and installs Hailstack into it. 
+The external command-line tools still need to be available on `PATH`; 
+see [External tool setup](#external-tool-setup-for-options-a-and-b).
 
-1. Make sure the external tools are on `PATH`. Adjust the example below to match where your site keeps them, or install them from upstream:
+1. Install `uv` if needed:
 
    ```bash
-   # Example: prepend site-local installs to PATH. Replace paths as appropriate.
-   export PATH="/path/to/python3.14/bin:$PATH"
-   export PATH="/path/to/packer:$PATH"
-   export PATH="/path/to/pulumi:$PATH"
-   export PATH="/path/to/ansible/venv/bin:$PATH"
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
 
-   # If Pulumi is not already site-managed, install the CLI verified
-   # against this Ceph RGW create path.
-   curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0
-   export PATH="$HOME/.pulumi/bin:$PATH"
-   hash -r
+2. Clone the repository and install Hailstack:
 
-   # Sanity check
-   python3.14 --version
+   ```bash
+   uv python install 3.14.6
+
+   git clone https://github.com/wtsi-hgi/hailstack.git
+   cd hailstack
+
+   uv sync
+   source .venv/bin/activate
+   ```
+
+   `hailstack` is now on your `PATH` for as long as the venv is active.
+
+3. Install or verify the external tools:
+
+   ```bash
    packer --version
    which pulumi
    pulumi version  # should print v3.226.0
    ansible-playbook --version
-   openstack --version   # from the python-openstackclient package
+   openstack --version
    ```
 
-   Hailstack can use `~/.pulumi/bin/pulumi` even if your active Python venv hides it from `PATH`, but keeping it on `PATH` makes manual `which pulumi` and `pulumi version` checks less surprising. If both `PATH` and `~/.pulumi/bin/pulumi` contain Pulumi candidates, Hailstack prefers a discovered `3.226.0` binary. The old latest install command, `curl -fsSL https://get.pulumi.com | sh`, is not enough for this backend because it can install a newer CLI that passes login and dry-run checks but fails real create state writes.
+4. Verify the install:
 
-2. Clone the repository and install Hailstack into a local virtual environment:
+   ```bash
+   hailstack --help
+   ```
+
+### Option B — Install into a local Python virtual environment
+
+Use this path if you prefer standard `venv` and `pip`. 
+The Python 3.14 should be pre-installed in your system.
+The external command-line tools still need to be available on `PATH`; 
+see [External tool setup](#external-tool-setup-for-options-a-and-b).
+
+
+1. Clone the repository and install Hailstack into a local virtual environment:
 
    ```bash
    git clone https://github.com/wtsi-hgi/hailstack.git
@@ -79,15 +101,84 @@ This path is the fastest if `packer`, `ansible-playbook`, `openstack`, and Pulum
 
    `hailstack` is now on your `PATH` for as long as the venv is active.
 
+2. Install or verify the external tools:
+
+   ```bash
+   packer --version
+   which pulumi
+   pulumi version  # should print v3.226.0
+   ansible-playbook --version
+   openstack --version
+   ```
+
 3. Verify the install:
 
    ```bash
    hailstack --help
    ```
 
-### Option B — Build and run the Apptainer image
+### External tool setup for Options A and B
 
-This path bundles Pulumi, Packer, Ansible, and the OpenStack client inside a single SIF, so the only host requirement is Apptainer (and Python 3.14 to build it).
+Install these tools yourself when you use a local Python environment. If your
+site already manages these tools, make sure its install locations are on `PATH`
+instead.
+
+```bash
+# Example: prepend site-local installs to PATH. Replace paths as appropriate.
+export PATH="/path/to/packer:$PATH"
+export PATH="/path/to/pulumi:$PATH"
+export PATH="/path/to/ansible/venv/bin:$PATH"
+
+# Packer
+wget \
+  https://releases.hashicorp.com/packer/1.15.4/packer_1.15.4_linux_amd64.zip
+unzip packer_1.15.4_linux_amd64.zip
+mkdir -p ~/.local/bin
+cp packer ~/.local/bin/
+export PATH="$HOME/.local/bin:$PATH"
+# packer plugins install github.com/hashicorp/openstack
+
+# OpenStack client, installed into the active venv.
+# Use the first command for Option A, or the second for Option B.
+uv pip install python-openstackclient
+# python -m pip install python-openstackclient
+
+# Pulumi CLI verified against this Ceph RGW create path
+curl -fsSL https://get.pulumi.com | sh -s -- --version 3.226.0
+export PATH="$HOME/.pulumi/bin:$PATH"
+hash -r
+
+# Sanity check
+python3.14 --version
+packer --version
+which pulumi
+pulumi version  # should print v3.226.0
+ansible-playbook --version
+openstack --version
+```
+
+Latest Pulumi is normally desirable, but this Ceph RGW-backed Pulumi state path
+currently requires Pulumi CLI `3.226.0`. 
+Remote create-path verification showed newer Pulumi/AWS SDK/Go Cloud S3 write paths can pass backend login and dry-run
+preview, then fail the first persisted stack lock write with
+`XAmzContentSHA256Mismatch`. 
+Hailstack still defaults AWS checksum compatibility variables for clarity and compatibility, but those settings do not make latest
+Pulumi safe for this backend.
+
+Hailstack can use `~/.pulumi/bin/pulumi` even if your active Python venv hides
+it from `PATH`, but keeping it on `PATH` makes manual `which pulumi` and
+`pulumi version` checks less surprising. If both `PATH` and
+`~/.pulumi/bin/pulumi` contain Pulumi candidates, Hailstack prefers a
+discovered `3.226.0` binary. The old latest install command,
+`curl -fsSL https://get.pulumi.com | sh`, is not enough for this backend
+because it can install a newer CLI that passes login and dry-run checks but
+fails real create state writes.
+
+### Option C — Build and run the Apptainer image
+
+This path bundles Pulumi, Packer, Ansible, and the OpenStack client inside a
+single SIF, so the only host requirement is Apptainer and Python 3.14 to build
+it.
 
 1. Ensure Apptainer is available.
 
@@ -95,7 +186,8 @@ This path bundles Pulumi, Packer, Ansible, and the OpenStack client inside a sin
    apptainer --version
    ```
 
-2. Clone the repository and build the image (root is required by `apptainer build`):
+2. Clone the repository and build the image. 
+   Root is required by `apptainer build`:
 
    ```bash
    git clone https://github.com/wtsi-hgi/hailstack.git
@@ -115,9 +207,13 @@ This path bundles Pulumi, Packer, Ansible, and the OpenStack client inside a sin
 
 ## Quick Start
 
-The steps below assume you have completed Installation and the `hailstack` command resolves to your venv install or your SIF alias.
+The steps below assume you have completed Installation and the `hailstack`
+command resolves to your installation. 
+**Run Hailstack from an OpenStack machine that has access to the CloudForms network; 
+running from the farm head node may not have the required network access.**
 
-1. Generate `~/.config/openstack/clouds.yaml` from your `openrc.sh`. Skip this step if you already have a working `clouds.yaml`.
+1. Generate `~/.config/openstack/clouds.yaml` from your Openstack `openrc.sh`. 
+   Skip this step if you already have a working `clouds.yaml`.
 
    ```bash
    source ./openrc.sh
@@ -150,6 +246,7 @@ The steps below assume you have completed Installation and the `hailstack` comma
    # Optional: only needed if Spark/Hadoop jobs access s3a:// data
    S3A_ACCESS_KEY=your-s3a-data-access-key
    S3A_SECRET_KEY=your-s3a-data-secret-key
+   OS_CLOUD=openstack  # cloud name from ~/.config/openstack/clouds.yaml created at step 1
    EOF
    chmod 600 .env
    ```
