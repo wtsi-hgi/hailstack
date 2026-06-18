@@ -86,7 +86,8 @@ source "openstack" "hailstack" {
   source_image     = var.base_image
   flavor           = var.flavor
   ssh_username     = var.ssh_username
-  ssh_timeout      = "30m"
+  ssh_timeout             = "5m"
+  pause_before_connecting = "60s"
   config_drive     = true
   networks         = local.packer_networks
   ports            = local.packer_ports

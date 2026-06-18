@@ -214,27 +214,28 @@ class _RecordingPortManager:
         self.events.append(f"port:cleanup:{port_id}")
 
 
-def test_default_packer_runner_stops_on_ssh_no_route_debug_log(
+def test_default_packer_runner_waits_after_ssh_no_route_debug_log(
     tmp_path: Path,
 ) -> None:
-    """Stop waiting when Packer's SSH debug log proves the fixed IP is unreachable."""
+    """Keep Packer running after a no-route SSH attempt so it can retry."""
     script = (
-        "import os, pathlib, time\n"
+        "import os, pathlib, sys, time\n"
         "log_path = pathlib.Path(os.environ['PACKER_LOG_PATH'])\n"
         "log_path.write_text("
         "'2026/06/05 TCP connection to SSH ip/port failed: "
         "dial tcp 192.168.252.82:22: connect: no route to host\\n', "
         "encoding='utf-8'"
         ")\n"
-        "time.sleep(2)\n"
+        "time.sleep(0.2)\n"
+        "sys.exit(7)\n"
     )
 
     start_time = time.monotonic()
     result = _run_packer([sys.executable, "-c", script], cwd=tmp_path)
     elapsed_seconds = time.monotonic() - start_time
 
-    assert result.returncode != 0
-    assert elapsed_seconds < 1.5
+    assert result.returncode == 7
+    assert elapsed_seconds >= 0.2
     assert "dial tcp 192.168.252.82:22: connect: no route to host" in result.stderr
 
 
@@ -1646,7 +1647,7 @@ def test_build_image_no_route_failure_explains_floating_ip_fix(
 
     message = str(raised.value)
     assert (
-        "could not SSH to the temporary build instance fixed IP `192.168.252.82`"
+        "could not SSH to the temporary build instance SSH address `192.168.252.82`"
         in message
     )
     assert "no route to host" in message
@@ -1994,7 +1995,8 @@ def test_repo_packer_template_declares_expected_scripts_and_env_vars() -> None:
     template = PACKER_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     assert 'image_name       = "hailstack-${var.bundle_id}"' in template
-    assert 'ssh_timeout      = "30m"' in template
+    assert 'ssh_timeout             = "5m"' in template
+    assert 'pause_before_connecting = "60s"' in template
     for variable_name in (
         "bundle_id",
         "hail_version",

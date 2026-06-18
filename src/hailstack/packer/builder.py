@@ -504,7 +504,7 @@ def _collect_packer_process(
     *,
     monitored_log_path: Path | None,
 ) -> subprocess.CompletedProcess[str]:
-    """Collect live Packer output and stop early for known unreachable SSH routes."""
+    """Collect live Packer output while preserving known SSH routing failures."""
     assert process.stdout is not None
     assert process.stderr is not None
 
@@ -517,27 +517,23 @@ def _collect_packer_process(
     no_route_line: str | None = None
 
     while process.poll() is None:
-        no_route_line = _drain_packer_output_events(
+        stream_no_route_line = _drain_packer_output_events(
             events,
             stdout_lines,
             stderr_lines,
         )
-        if no_route_line is not None:
-            break
+        if no_route_line is None:
+            no_route_line = stream_no_route_line
 
-        no_route_line, log_position = _read_packer_log_for_no_route(
+        log_no_route_line, log_position = _read_packer_log_for_no_route(
             monitored_log_path,
             log_position,
         )
-        if no_route_line is not None:
-            break
+        if no_route_line is None:
+            no_route_line = log_no_route_line
         time.sleep(_PACKER_MONITOR_POLL_SECONDS)
 
-    returncode = (
-        _interrupt_packer_process(process)
-        if no_route_line is not None
-        else process.wait()
-    )
+    returncode = process.wait()
     final_no_route_line, _ = _read_packer_log_for_no_route(
         monitored_log_path,
         log_position,
@@ -933,9 +929,9 @@ def _packer_ssh_no_route_failure_detail(
 
     host = _extract_packer_ssh_no_route_host(raw_output)
     target = (
-        f"temporary build instance fixed IP `{host}`"
+        f"temporary build instance SSH address `{host}`"
         if host is not None
-        else "temporary build instance fixed IP"
+        else "temporary build instance SSH address"
     )
     network = (
         f"`cluster.network_name` (`{network_name}`)"
@@ -944,7 +940,7 @@ def _packer_ssh_no_route_failure_detail(
     )
     return (
         f"Packer could not SSH to the {target}: no route to host. "
-        f"The Hailstack runner cannot reach the build instance on {network}. "
+        f"The Hailstack runner cannot reach that build instance address for {network}. "
         "Set `cluster.floating_ip_pool` or `[packer].floating_ip_pool` to a "
         "reachable external floating IP pool, or run Hailstack from a host "
         "that can route to `cluster.network_name`."
