@@ -1647,10 +1647,13 @@ def test_build_image_no_route_failure_explains_floating_ip_fix(
 
     message = str(raised.value)
     assert (
-        "could not SSH to the temporary build instance SSH address `192.168.252.82`"
+        "logged at least one SSH no-route attempt to the temporary build instance "
+        "SSH address `192.168.252.82`"
         in message
     )
     assert "no route to host" in message
+    assert "Raw Packer output:" in message
+    assert "TCP connection to SSH ip/port failed" in message
     assert "`cluster.floating_ip_pool`" in message
     assert "`[packer].floating_ip_pool`" in message
     assert "`cluster.network_name` (`cloudforms_network`)" in message

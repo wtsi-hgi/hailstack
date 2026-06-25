@@ -860,7 +860,7 @@ def _packer_failure_detail(
         network_name=network_name,
     )
     if no_route_detail is not None:
-        return no_route_detail
+        return f"{no_route_detail}\nRaw Packer output:\n{raw_output}"
 
     diagnostics = _extract_packer_diagnostics(raw_output)
     if not diagnostics:
@@ -887,7 +887,7 @@ def _packer_ssh_no_route_failure_detail(
     *,
     network_name: str | None,
 ) -> str | None:
-    """Explain an unreachable fixed-IP SSH route from Packer's debug output."""
+    """Explain an SSH no-route attempt from Packer's debug output."""
     if not any(_is_packer_ssh_no_route_line(line) for line in raw_output.splitlines()):
         return None
 
@@ -903,8 +903,9 @@ def _packer_ssh_no_route_failure_detail(
         else "`cluster.network_name`"
     )
     return (
-        f"Packer could not SSH to the {target}: no route to host. "
-        f"The Hailstack runner cannot reach that build instance address for {network}. "
+        f"Packer logged at least one SSH no-route attempt to the {target}. "
+        f"If the final failure was an SSH timeout, the Hailstack runner likely "
+        f"cannot reach that build instance address for {network}. "
         "Set `cluster.floating_ip_pool` or `[packer].floating_ip_pool` to a "
         "reachable external floating IP pool, or run Hailstack from a host "
         "that can route to `cluster.network_name`."
