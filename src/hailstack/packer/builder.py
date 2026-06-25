@@ -28,7 +28,6 @@ import logging
 import os
 import queue
 import re
-import signal
 import subprocess
 import tempfile
 import threading
@@ -84,7 +83,6 @@ REQUIRED_PACKER_SCRIPT_PATHS = tuple(
 )
 _MAX_PACKER_DIAGNOSTIC_LINES = 8
 _PACKER_MONITOR_POLL_SECONDS = 0.05
-_PACKER_INTERRUPT_GRACE_SECONDS = 5.0
 _PACKER_SSH_SECURITY_GROUP_NAME_PREFIX = "hailstack-packer-ssh-"
 _PACKER_SSH_SECURITY_GROUP_DESCRIPTION = (
     "Temporary Hailstack Packer SSH access for image build"
@@ -504,7 +502,7 @@ def _collect_packer_process(
     *,
     monitored_log_path: Path | None,
 ) -> subprocess.CompletedProcess[str]:
-    """Collect live Packer output and stop early for known unreachable SSH routes."""
+    """Collect live Packer output while preserving known SSH routing failures."""
     assert process.stdout is not None
     assert process.stderr is not None
 
@@ -517,27 +515,23 @@ def _collect_packer_process(
     no_route_line: str | None = None
 
     while process.poll() is None:
-        no_route_line = _drain_packer_output_events(
+        stream_no_route_line = _drain_packer_output_events(
             events,
             stdout_lines,
             stderr_lines,
         )
-        if no_route_line is not None:
-            break
+        if no_route_line is None:
+            no_route_line = stream_no_route_line
 
-        no_route_line, log_position = _read_packer_log_for_no_route(
+        log_no_route_line, log_position = _read_packer_log_for_no_route(
             monitored_log_path,
             log_position,
         )
-        if no_route_line is not None:
-            break
+        if no_route_line is None:
+            no_route_line = log_no_route_line
         time.sleep(_PACKER_MONITOR_POLL_SECONDS)
 
-    returncode = (
-        _interrupt_packer_process(process)
-        if no_route_line is not None
-        else process.wait()
-    )
+    returncode = process.wait()
     final_no_route_line, _ = _read_packer_log_for_no_route(
         monitored_log_path,
         log_position,
@@ -643,41 +637,6 @@ def _first_packer_ssh_no_route_line(lines: list[str]) -> str | None:
         if _is_packer_ssh_no_route_line(line):
             return line.strip()
     return None
-
-
-def _interrupt_packer_process(process: subprocess.Popen[str]) -> int:
-    """Ask Packer to stop, then escalate if it does not exit promptly."""
-    _send_packer_signal(process, signal.SIGINT)
-    try:
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        _send_packer_signal(process, signal.SIGTERM)
-
-    try:
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-
-
-def _send_packer_signal(
-    process: subprocess.Popen[str],
-    requested_signal: signal.Signals,
-) -> None:
-    """Send a signal to the Packer process or process group."""
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, requested_signal)
-            return
-        if requested_signal == signal.SIGINT:
-            process.terminate()
-            return
-        if requested_signal == signal.SIGTERM:
-            process.terminate()
-            return
-        process.kill()
-    except ProcessLookupError:
-        return
 
 
 def _append_uncaptured_packer_failure_line(
@@ -900,7 +859,7 @@ def _packer_failure_detail(
         network_name=network_name,
     )
     if no_route_detail is not None:
-        return no_route_detail
+        return f"{no_route_detail}\nRaw Packer output:\n{raw_output}"
 
     diagnostics = _extract_packer_diagnostics(raw_output)
     if not diagnostics:
@@ -927,15 +886,15 @@ def _packer_ssh_no_route_failure_detail(
     *,
     network_name: str | None,
 ) -> str | None:
-    """Explain an unreachable fixed-IP SSH route from Packer's debug output."""
+    """Explain an SSH no-route attempt from Packer's debug output."""
     if not any(_is_packer_ssh_no_route_line(line) for line in raw_output.splitlines()):
         return None
 
     host = _extract_packer_ssh_no_route_host(raw_output)
     target = (
-        f"temporary build instance fixed IP `{host}`"
+        f"temporary build instance SSH address `{host}`"
         if host is not None
-        else "temporary build instance fixed IP"
+        else "temporary build instance SSH address"
     )
     network = (
         f"`cluster.network_name` (`{network_name}`)"
@@ -943,8 +902,9 @@ def _packer_ssh_no_route_failure_detail(
         else "`cluster.network_name`"
     )
     return (
-        f"Packer could not SSH to the {target}: no route to host. "
-        f"The Hailstack runner cannot reach the build instance on {network}. "
+        f"Packer logged at least one SSH no-route attempt to the {target}. "
+        f"If the final failure was an SSH timeout, the Hailstack runner likely "
+        f"cannot reach that build instance address for {network}. "
         "Set `cluster.floating_ip_pool` or `[packer].floating_ip_pool` to a "
         "reachable external floating IP pool, or run Hailstack from a host "
         "that can route to `cluster.network_name`."

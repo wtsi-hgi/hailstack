@@ -11,6 +11,7 @@ dependencies = [
     "typer>=0.16.0",
     "pulumi>=3.226.0",
     "pulumi-openstack>=5.4.1",
+    "python-openstackclient>=10.1.0"
 ]
 
 [project.scripts]
