@@ -28,7 +28,6 @@ import logging
 import os
 import queue
 import re
-import signal
 import subprocess
 import tempfile
 import threading
@@ -639,41 +638,6 @@ def _first_packer_ssh_no_route_line(lines: list[str]) -> str | None:
         if _is_packer_ssh_no_route_line(line):
             return line.strip()
     return None
-
-
-def _interrupt_packer_process(process: subprocess.Popen[str]) -> int:
-    """Ask Packer to stop, then escalate if it does not exit promptly."""
-    _send_packer_signal(process, signal.SIGINT)
-    try:
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        _send_packer_signal(process, signal.SIGTERM)
-
-    try:
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.wait(timeout=_PACKER_INTERRUPT_GRACE_SECONDS)
-
-
-def _send_packer_signal(
-    process: subprocess.Popen[str],
-    requested_signal: signal.Signals,
-) -> None:
-    """Send a signal to the Packer process or process group."""
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, requested_signal)
-            return
-        if requested_signal == signal.SIGINT:
-            process.terminate()
-            return
-        if requested_signal == signal.SIGTERM:
-            process.terminate()
-            return
-        process.kill()
-    except ProcessLookupError:
-        return
 
 
 def _append_uncaptured_packer_failure_line(
