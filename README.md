@@ -212,7 +212,7 @@ command resolves to your installation.
 **Run Hailstack from an OpenStack machine that has access to the CloudForms network; 
 running from the farm head node may not have the required network access.**
 
-1. Generate `~/.config/openstack/clouds.yaml` from your Openstack `openrc.sh`. 
+1. Generate `~/.config/openstack/clouds.yaml` from your OpenStack `openrc.sh`.
    Skip this step if you already have a working `clouds.yaml`.
 
    ```bash
