@@ -1648,8 +1648,7 @@ def test_build_image_no_route_failure_explains_floating_ip_fix(
     message = str(raised.value)
     assert (
         "logged at least one SSH no-route attempt to the temporary build instance "
-        "SSH address `192.168.252.82`"
-        in message
+        "SSH address `192.168.252.82`" in message
     )
     assert "no route to host" in message
     assert "Raw Packer output:" in message

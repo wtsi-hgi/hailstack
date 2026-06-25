@@ -372,8 +372,8 @@ cluster-specific deployment.
 The image contains reusable software, not a specific cluster shape. 
 These settings are baked into the image and require a new image when changed:
 
-- The selected compatibility bundle versions: Hail, Spark, Hadoop, Java,
-  Python, Scala, and gnomAD.
+- The selected compatibility bundle versions: Java, Scala, Hadoop, Spark, Python, Hail, and gnomAD. 
+  Bundles are configured separately in `bundles.toml`.
 - `[packer].base_image`, because it is the operating-system image Packer boots
   before installing Hailstack software.
 - `[packer].gnomad_methods_version`.
